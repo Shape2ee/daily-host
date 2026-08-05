@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { DAY_LABELS } from "../../constants/hosts";
 import { useScheduler } from "../../hooks/useScheduler";
 import {
+  clearNotionSchedules,
   fetchNotionSchedules,
   upsertNotionSchedules,
 } from "../../api/notion";
@@ -277,10 +278,24 @@ export function Dashboard() {
     }
   };
 
-  const handleResetConfirm = () => {
-    resetAll();
+  const handleResetConfirm = async () => {
     setIsResetOpen(false);
-    showToast("일정과 수행 횟수가 초기화되었습니다.");
+    const { start, end, month } = getMonthRange();
+    resetAll();
+    setNotionBusy(true);
+    try {
+      const data = await clearNotionSchedules({ start, end });
+      showToast(
+        `일정/횟수 초기화 · Notion ${month}월 ${data.archived ?? 0}건 삭제`,
+      );
+      setHistoryTick((n) => n + 1);
+    } catch (error) {
+      showToast(
+        `로컬은 초기화되었습니다. Notion 동기화 실패: ${error.message}`,
+      );
+    } finally {
+      setNotionBusy(false);
+    }
   };
 
   return (
@@ -380,7 +395,7 @@ export function Dashboard() {
       {isResetOpen && (
         <ConfirmModal
           title="일정/횟수 초기화"
-          message="확정 일정과 수행 횟수만 초기화합니다. 호스트 목록과 큐 순서는 유지됩니다. 계속하시겠습니까?"
+          message="확정 일정과 수행 횟수를 초기화하고, Notion의 이번 달 Schedule History도 삭제합니다. 호스트 목록과 큐 순서는 유지됩니다. 계속하시겠습니까?"
           confirmLabel="초기화"
           danger
           onCancel={() => setIsResetOpen(false)}

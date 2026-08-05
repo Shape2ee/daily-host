@@ -45,3 +45,10 @@ export function upsertNotionSchedules(weeks) {
     body: JSON.stringify({ weeks }),
   });
 }
+
+export function clearNotionSchedules({ start, end } = {}) {
+  return request('/api/notion/schedules/clear', {
+    method: 'POST',
+    body: JSON.stringify({ start, end }),
+  });
+}

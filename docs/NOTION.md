@@ -51,7 +51,8 @@ API는 `api/index.js` → Express(`server/app.js`)로 동작하며, 프론트와
 | 주차 확정 / 맞교환 / 패스 | 앱 → Notion | **자동** upsert |
 | 확정 주차 업로드 (상단/패널) | 앱 → Notion | 수동 일괄 upsert |
 | 히스토리 조회 | Notion → 앱 모달 | 확정 이력 열람 |
-| **앱 첫 진입** | Notion → 앱 weeks | **당월** Period와 겹치는 확정 주차 hydrate (없으면 빈 화면) |
+| 앱 첫 진입 | Notion → 앱 weeks | **당월** Period와 겹치는 확정 주차 hydrate (없으면 빈 화면) |
+| 일정/횟수 초기화 | 앱 + Notion | 로컬 weeks/횟수 초기화 + **당월** Schedule History 아카이브 |
 
 ## 보안
 

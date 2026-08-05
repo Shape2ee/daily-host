@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   assertConfigured,
+  archiveSchedules,
   createNotionClient,
   getConfig,
   listSchedules,
@@ -106,6 +107,27 @@ export function createApp() {
       res.status(error.status || 500).json({
         ok: false,
         error: error.message || '스케줄 동기화 실패',
+      });
+    }
+  });
+
+  app.post('/api/notion/schedules/clear', async (req, res) => {
+    try {
+      const config = assertConfigured('schedule');
+      const notion = createNotionClient(config.token);
+      const start = typeof req.body?.start === 'string' ? req.body.start : '';
+      const end = typeof req.body?.end === 'string' ? req.body.end : '';
+
+      const result = await archiveSchedules(notion, config.scheduleDbId, {
+        start: start || undefined,
+        end: end || undefined,
+      });
+
+      res.json({ ok: true, archived: result.archived });
+    } catch (error) {
+      res.status(error.status || 500).json({
+        ok: false,
+        error: error.message || '스케줄 초기화 실패',
       });
     }
   });

@@ -137,6 +137,39 @@ export async function listSchedules(notion, scheduleDbId) {
     .sort((a, b) => String(b.startDate ?? '').localeCompare(String(a.startDate ?? '')));
 }
 
+/**
+ * Period가 [rangeStart, rangeEnd]와 겹치는 스케줄 페이지를 아카이브한다.
+ * 범위가 없으면 Schedule History 전체 아카이브.
+ */
+export async function archiveSchedules(
+  notion,
+  scheduleDbId,
+  { start: rangeStart, end: rangeEnd } = {},
+) {
+  const pages = await queryAll(notion, scheduleDbId);
+  let archived = 0;
+
+  for (const page of pages) {
+    const schedule = mapSchedulePage(page);
+    if (!schedule.weekKey && !schedule.name) continue;
+
+    if (rangeStart && rangeEnd) {
+      const start = schedule.startDate || schedule.endDate;
+      const end = schedule.endDate || schedule.startDate;
+      if (!start) continue;
+      if (!(start <= rangeEnd && end >= rangeStart)) continue;
+    }
+
+    await notion.pages.update({
+      page_id: page.id,
+      archived: true,
+    });
+    archived += 1;
+  }
+
+  return { archived };
+}
+
 export async function upsertSchedule(notion, scheduleDbId, week) {
   const existing = await queryAll(notion, scheduleDbId, {
     property: 'WeekKey',
