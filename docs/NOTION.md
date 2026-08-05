@@ -11,8 +11,8 @@
 | Name | Title | 호스트 이름 |
 | Active | Checkbox | 활성 여부 (꺼지면 앱 큐에서 제외) |
 | AppHostId | Number | 앱 내부 ID (매핑/upsert 키) |
-| Priority | Number | **현재** Priority Queue 순서 (0이 다음 배정) |
-| BasePriority | Number | 기준 큐 순서 (맞교환 replay용) |
+| Priority | **Number** | **현재** Priority Queue 순서 (0이 다음 배정) |
+| BasePriority | **Number** | 기준 큐 순서 (맞교환 replay용) |
 | Note | Rich text | 메모 (선택) |
 
 ### 2) `Daily Host · Schedule History` (확정 주차 히스토리)
@@ -30,7 +30,8 @@
 | SlackText | Rich text | 슬랙 공유 문구 |
 | Status | Select | `Confirmed` / `Updated` |
 
-> Relation 대신 이름을 저장하는 이유: upsert·히스토리 조회가 단순하고, 멤버 이름 변경에도 당시 기록이 남습니다.
+> `Priority` / `BasePriority` 는 반드시 **Number** 타입이어야 합니다. (텍스트면 API 오류)
+
 
 ## 셋업 순서
 
