@@ -8,19 +8,30 @@ export function ScheduleContainer({
   weeks,
   hosts,
   hostMap,
-  isWeekFrozen,
+  loading = false,
   onUpdateAttendance,
   onConfirm,
   onSwap,
-  onEmergencyPass,
   onCopySlack,
 }) {
+  if (loading) {
+    return (
+      <div className={styles.empty}>
+        <h3 className={styles.emptyTitle}>Notion 기록 확인 중…</h3>
+        <p className={styles.emptyText}>
+          이번 달 확정 호스트 기록이 있는지 불러오고 있습니다.
+        </p>
+      </div>
+    );
+  }
+
   if (weeks.length === 0) {
     return (
       <div className={styles.empty}>
         <h3 className={styles.emptyTitle}>일정이 없습니다</h3>
         <p className={styles.emptyText}>
-          상단에서 시작일·종료일을 선택한 뒤 &quot;일정 조회&quot;를 눌러 주세요.
+          이번 달 Notion 확정 기록이 없습니다. <br/>상단에서 시작일·종료일을 선택한 뒤
+          &quot;일정 조회&quot;로 새 주차를 만들어 주세요.
         </p>
       </div>
     );
@@ -32,14 +43,13 @@ export function ScheduleContainer({
         <WeekSection
           key={week.id}
           week={week}
+          weeks={weeks}
           weekNumber={index + 1}
           hosts={hosts}
           hostMap={hostMap}
-          frozen={isWeekFrozen(week.id)}
           onUpdateAttendance={onUpdateAttendance}
           onConfirm={onConfirm}
           onSwap={onSwap}
-          onEmergencyPass={onEmergencyPass}
           onCopySlack={onCopySlack}
         />
       ))}

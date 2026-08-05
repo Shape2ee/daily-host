@@ -66,24 +66,8 @@
   color: var(--color-warning);
 }
 
-.passBadge {
+.pastBadge {
   color: var(--color-warning);
   font-size: 0.7rem;
   font-weight: 600;
-}
-
-.passButton {
-  align-self: flex-start;
-  padding: 6px 10px;
-  border: 1px solid #fde68a;
-  border-radius: var(--radius-sm);
-  background: #fffbeb;
-  color: #b45309;
-  font-size: 0.75rem;
-  font-weight: 700;
-  transition: background var(--transition);
-
-  &:hover {
-    background: #fef3c7;
-  }
 }

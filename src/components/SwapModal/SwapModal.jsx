@@ -1,18 +1,29 @@
 import { useMemo, useState } from 'react';
 import { DAY_LABELS } from '../../constants/hosts';
 import {
-  findAssignedDay,
-  getAvailableDays,
+  findHostAssignment,
+  formatDate,
+  getDateForDay,
+  getSwappableDays,
 } from '../../utils/scheduler';
 import styles from './SwapModal.module.scss';
 
 /**
  * 확정된 주차 교체/맞교환 모달.
- * - 요일 선택 + 상대 호스트 선택 (배정/미배정 모두 가능)
- * - 상대가 다른 요일 담당이면 맞교환, 미배정이면 해당 요일만 교체
+ * - 지나지 않은 요일만 선택 가능
+ * - 다른 주차의 미래 배정자와도 맞교환 가능
+ * - 상대가 미래 배정이 없으면 해당 요일만 교체
  */
-export function SwapModal({ week, hosts, hostMap, onClose, onSwap }) {
-  const availableDays = useMemo(() => getAvailableDays(week), [week]);
+export function SwapModal({
+  week,
+  weeks = [],
+  weekNumber,
+  hosts,
+  hostMap,
+  onClose,
+  onSwap,
+}) {
+  const swappableDays = useMemo(() => getSwappableDays(week), [week]);
 
   const weekHosts = useMemo(
     () =>
@@ -22,13 +33,20 @@ export function SwapModal({ week, hosts, hostMap, onClose, onSwap }) {
     [hosts, week],
   );
 
-  const [day, setDay] = useState(availableDays[0]);
-  const currentHostId = week.assignments[day];
+  const weekIndexById = useMemo(() => {
+    const list = weeks.length > 0 ? weeks : [week];
+    const map = new Map();
+    list.forEach((w, index) => map.set(w.id, index + 1));
+    return map;
+  }, [weeks, week]);
 
-  const candidates = useMemo(
-    () => weekHosts.filter((host) => host.id !== currentHostId),
-    [weekHosts, currentHostId],
-  );
+  const [day, setDay] = useState(swappableDays[0]);
+  const currentHostId = day ? week.assignments[day] : undefined;
+
+  const candidates = useMemo(() => {
+    if (!day) return [];
+    return weekHosts.filter((host) => host.id !== currentHostId);
+  }, [weekHosts, currentHostId, day]);
 
   const [targetHostId, setTargetHostId] = useState(
     () => candidates[0]?.id ?? '',
@@ -40,15 +58,24 @@ export function SwapModal({ week, hosts, hostMap, onClose, onSwap }) {
     return hostMap.get(hostId)?.name ?? '미배정';
   };
 
-  const describeCandidate = (host) => {
-    const assignedDay = findAssignedDay(week, host.id);
-    if (assignedDay) {
-      return `${host.name} (${DAY_LABELS[assignedDay]} 담당)`;
-    }
-    return `${host.name} (미배정)`;
+  const lookupWeeks = weeks.length > 0 ? weeks : [week];
+
+  const describeSlot = (slot) => {
+    if (!slot) return '미배정';
+    const n = weekIndexById.get(slot.weekId) ?? '?';
+    const date = getDateForDay(slot.week, slot.day);
+    const dateLabel = date ? formatDate(date) : DAY_LABELS[slot.day];
+    return `${n}주차 ${DAY_LABELS[slot.day]} (${dateLabel})`;
   };
 
-  // 요일 변경 시 후보/선택이 어긋나면 보정
+  const describeCandidate = (host) => {
+    const slot = findHostAssignment(lookupWeeks, host.id, { futureOnly: true });
+    if (slot) {
+      return `${host.name} — ${describeSlot(slot)} 담당`;
+    }
+    return `${host.name} (미래 배정 없음)`;
+  };
+
   const effectiveTargetId = candidates.some((h) => h.id === Number(targetHostId))
     ? Number(targetHostId)
     : candidates[0]?.id;
@@ -62,15 +89,19 @@ export function SwapModal({ week, hosts, hostMap, onClose, onSwap }) {
 
   const handleSubmit = (event) => {
     event.preventDefault();
-    if (effectiveTargetId == null) return;
+    if (!day || effectiveTargetId == null) return;
     onSwap(day, effectiveTargetId);
     onClose();
   };
 
-  const targetAssignedDay =
+  const targetSlot =
     effectiveTargetId != null
-      ? findAssignedDay(week, effectiveTargetId)
+      ? findHostAssignment(lookupWeeks, effectiveTargetId, { futureOnly: true })
       : null;
+
+  const sourceLabel = day
+    ? `${weekNumber ?? weekIndexById.get(week.id) ?? '?'}주차 ${DAY_LABELS[day]}`
+    : '';
 
   return (
     <div className={styles.overlay} role="presentation" onClick={onClose}>
@@ -96,69 +127,72 @@ export function SwapModal({ week, hosts, hostMap, onClose, onSwap }) {
         </header>
 
         <p className={styles.hint}>
-          선택한 요일의 담당자를 다른 호스트와 바꿉니다. 상대가 이미 다른
-          요일 담당이면 맞교환, 미배정이면 해당 요일만 교체됩니다. 이후 큐는
-          소급 재정렬되어 미확정 차주에 반영됩니다.
+          아직 지나지 않은 요일만 바꿀 수 있습니다. 다음 주차에 이미 배정된
+          사람과도, 양쪽 날짜가 미래라면 맞교환할 수 있습니다.
         </p>
 
-        <form className={styles.form} onSubmit={handleSubmit}>
-          <label className={styles.field}>
-            <span className={styles.label}>바꿀 요일</span>
-            <select
-              className={styles.select}
-              value={day}
-              onChange={(e) => handleDayChange(e.target.value)}
-            >
-              {availableDays.map((d) => (
-                <option key={d} value={d}>
-                  {DAY_LABELS[d]} — {resolveDayName(d)}
-                </option>
-              ))}
-            </select>
-          </label>
+        {swappableDays.length === 0 ? (
+          <p className={styles.hint}>교환 가능한 요일이 없습니다.</p>
+        ) : (
+          <form className={styles.form} onSubmit={handleSubmit}>
+            <label className={styles.field}>
+              <span className={styles.label}>바꿀 요일</span>
+              <select
+                className={styles.select}
+                value={day}
+                onChange={(e) => handleDayChange(e.target.value)}
+              >
+                {swappableDays.map((d) => (
+                  <option key={d} value={d}>
+                    {DAY_LABELS[d]} — {resolveDayName(d)}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-          <div className={styles.swapIcon} aria-hidden>
-            ⇄
-          </div>
+            <div className={styles.swapIcon} aria-hidden>
+              ⇄
+            </div>
 
-          <label className={styles.field}>
-            <span className={styles.label}>상대 호스트</span>
-            <select
-              className={styles.select}
-              value={effectiveTargetId ?? ''}
-              onChange={(e) => setTargetHostId(Number(e.target.value))}
-            >
-              {candidates.map((host) => (
-                <option key={host.id} value={host.id}>
-                  {describeCandidate(host)}
-                </option>
-              ))}
-            </select>
-          </label>
+            <label className={styles.field}>
+              <span className={styles.label}>상대 호스트</span>
+              <select
+                className={styles.select}
+                value={effectiveTargetId ?? ''}
+                onChange={(e) => setTargetHostId(Number(e.target.value))}
+              >
+                {candidates.map((host) => (
+                  <option key={host.id} value={host.id}>
+                    {describeCandidate(host)}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-          {effectiveTargetId != null && (
-            <p className={styles.preview}>
-              {targetAssignedDay
-                ? `${DAY_LABELS[day]} ↔ ${DAY_LABELS[targetAssignedDay]} 맞교환`
-                : `${DAY_LABELS[day]} 담당 → ${
-                    hostMap.get(effectiveTargetId)?.name ?? ''
-                  } 로 교체`}
-            </p>
-          )}
+            {effectiveTargetId != null && (
+              <p className={styles.preview}>
+                {targetSlot
+                  ? `${sourceLabel} ↔ ${describeSlot(targetSlot)} 맞교환`
+                  : `${sourceLabel} 담당 → ${
+                      hostMap.get(effectiveTargetId)?.name ?? ''
+                    } 로 교체`}
+              </p>
+            )}
 
-          <div className={styles.actions}>
-            <button type="button" className={styles.cancel} onClick={onClose}>
-              취소
-            </button>
-            <button
-              type="submit"
-              className={styles.confirm}
-              disabled={effectiveTargetId == null || candidates.length === 0}
-            >
-              교환 확정
-            </button>
-          </div>
-        </form>
+            <div className={styles.actions}>
+              <button type="button" className={styles.cancel} onClick={onClose}>
+                취소
+              </button>
+              <button
+                type="submit"
+                className={styles.confirm}
+                disabled={effectiveTargetId == null || candidates.length === 0}
+              >
+                교환 확정
+              </button>
+            </div>
+          </form>
+        )}
       </div>
     </div>
   );

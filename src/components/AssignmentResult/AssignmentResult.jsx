@@ -1,16 +1,11 @@
 import { DAY_LABELS } from '../../constants/hosts';
-import { getAvailableDays } from '../../utils/scheduler';
+import { getAvailableDays, isDayPast } from '../../utils/scheduler';
 import styles from './AssignmentResult.module.scss';
 
 /**
- * 확정된 주차의 자동 배정 결과 + 당일 패스 버튼.
+ * 확정된 주차의 자동 배정 결과.
  */
-export function AssignmentResult({
-  week,
-  hostMap,
-  frozen = false,
-  onEmergencyPass,
-}) {
+export function AssignmentResult({ week, hostMap }) {
   const availableDays = getAvailableDays(week);
 
   return (
@@ -20,10 +15,7 @@ export function AssignmentResult({
         {availableDays.map((day) => {
           const hostId = week.assignments[day];
           const host = hostId !== undefined ? hostMap.get(hostId) : undefined;
-          const passInfo = week.passes?.[day];
-          const fromName = passInfo
-            ? hostMap.get(passInfo.fromId)?.name
-            : null;
+          const past = isDayPast(week, day);
 
           return (
             <li key={day} className={styles.item}>
@@ -39,23 +31,11 @@ export function AssignmentResult({
                   >
                     {host ? host.name : '미배정'}
                   </span>
-                  {passInfo && (
-                    <span className={styles.passBadge}>
-                      Pass ← {fromName ?? '?'}
-                    </span>
+                  {past && (
+                    <span className={styles.pastBadge}>지난 날짜</span>
                   )}
                 </div>
               </div>
-              {!frozen && hostId !== undefined && onEmergencyPass && (
-                <button
-                  type="button"
-                  className={styles.passButton}
-                  onClick={() => onEmergencyPass(day)}
-                  title="큐 순위 유지한 채 2순위 출근자에게 이관"
-                >
-                  당일 패스
-                </button>
-              )}
             </li>
           );
         })}

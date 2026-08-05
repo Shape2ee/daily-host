@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { DAY_LABELS } from '../../constants/hosts';
 import {
   formatDate,
   formatSlackShare,
   getAvailableDays,
+  getSwappableDays,
 } from '../../utils/scheduler';
 import { AttendanceTable } from '../AttendanceTable/AttendanceTable';
 import { AssignmentResult } from '../AssignmentResult/AssignmentResult';
@@ -12,24 +13,25 @@ import { SwapModal } from '../SwapModal/SwapModal';
 import styles from './WeekSection.module.scss';
 
 /**
- * 주차 카드: 출근표 / 배정 / 확정 / Swap / Emergency Pass.
- * Freeze Rule: 이후 확정 주차가 있으면 과거 확정 주차는 편집 불가.
+ * 주차 카드: 출근표 / 배정 / 확정 / Swap.
+ * 교환은 지난 날짜만 막고, 이후 주차 확정과 무관하게 미래 요일은 가능.
  */
 export function WeekSection({
   week,
+  weeks,
   weekNumber,
   hosts,
   hostMap,
-  frozen,
   onUpdateAttendance,
   onConfirm,
   onSwap,
-  onEmergencyPass,
   onCopySlack,
 }) {
   const [isSwapOpen, setIsSwapOpen] = useState(false);
   const availableDays = getAvailableDays(week);
   const daySummary = availableDays.map((d) => DAY_LABELS[d]).join(' · ');
+  const swappableDays = useMemo(() => getSwappableDays(week), [week]);
+  const canSwap = week.confirmed && swappableDays.length > 0;
 
   const weekHosts = hosts.filter((host) =>
     Object.prototype.hasOwnProperty.call(week.attendance.monday, host.id),
@@ -39,7 +41,6 @@ export function WeekSection({
     styles.card,
     week.isLocked ? styles.locked : '',
     week.confirmed ? styles.confirmed : '',
-    frozen ? styles.frozen : '',
   ]
     .filter(Boolean)
     .join(' ');
@@ -66,18 +67,11 @@ export function WeekSection({
             {week.isLocked && (
               <span className={styles.lockedBadge}>잠금</span>
             )}
-            {frozen && <span className={styles.frozenBadge}>동결</span>}
           </div>
           <h3 className={styles.title}>
             {formatDate(week.startDate)} ~ {formatDate(week.endDate)}
           </h3>
           <p className={styles.days}>{daySummary}</p>
-          {frozen && (
-            <p className={styles.freezeHint}>
-              Freeze Rule: 과거 확정 주차는 고정됩니다. 큐 재정렬은 미확정
-              차주에만 반영됩니다.
-            </p>
-          )}
         </div>
       </header>
 
@@ -90,14 +84,8 @@ export function WeekSection({
       />
 
       {week.confirmed && (
-        <AssignmentResult
-          week={week}
-          hostMap={hostMap}
-          frozen={frozen}
-          onEmergencyPass={(day) => onEmergencyPass(week.id, day)}
-        />
+        <AssignmentResult week={week} hostMap={hostMap} />
       )}
-
       <div className={styles.actions}>
         {!week.confirmed ? (
           <ConfirmButton
@@ -106,7 +94,7 @@ export function WeekSection({
           />
         ) : (
           <>
-            {!frozen && (
+            {canSwap && (
               <button
                 type="button"
                 className={styles.swapButton}
@@ -126,9 +114,11 @@ export function WeekSection({
         )}
       </div>
 
-      {isSwapOpen && week.confirmed && !frozen && (
+      {isSwapOpen && canSwap && (
         <SwapModal
           week={week}
+          weeks={weeks}
+          weekNumber={weekNumber}
           hosts={hosts}
           hostMap={hostMap}
           onClose={() => setIsSwapOpen(false)}

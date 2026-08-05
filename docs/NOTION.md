@@ -41,7 +41,7 @@
 ### Vercel 배포 시
 
 같은 변수를 Vercel Project Environment Variables에 넣고 Redeploy 합니다.  
-API는 `api/[...path].js` → Express(`server/app.js`)로 동작하며, 프론트와 동일 도메인의 `/api/*`로 호출됩니다.
+API는 `api/index.js` → Express(`server/app.js`)로 동작하며, 프론트와 동일 도메인의 `/api/*`로 호출됩니다.
 
 ## 동기화 동작
 
@@ -51,6 +51,7 @@ API는 `api/[...path].js` → Express(`server/app.js`)로 동작하며, 프론�
 | 주차 확정 / 맞교환 / 패스 | 앱 → Notion | **자동** upsert |
 | 확정 주차 업로드 (상단/패널) | 앱 → Notion | 수동 일괄 upsert |
 | 히스토리 조회 | Notion → 앱 모달 | 확정 이력 열람 |
+| **앱 첫 진입** | Notion → 앱 weeks | **당월** Period와 겹치는 확정 주차 hydrate (없으면 빈 화면) |
 
 ## 보안
 

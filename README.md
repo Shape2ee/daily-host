@@ -45,7 +45,7 @@ Notion 연동은 [docs/NOTION.md](./docs/NOTION.md) 참고.
 
 1. 호스트 관리 / Priority Queue / 수행 비율
 2. 일정 조회 · 출근 체크 · 자동 배정 확정
-3. Freeze Rule · InActive · Emergency Pass · Swap(+미배정 교체)
+3. Freeze Rule · InActive · Swap(+미배정·주차 간 교체)
 4. JSON 백업 · 슬랙 공유 복사
 5. **Notion**: 멤버 push, 확정 주차 히스토리 upsert
 
@@ -58,7 +58,6 @@ Notion 연동은 [docs/NOTION.md](./docs/NOTION.md) 참고.
 
 ## 예외 처리 및 백업 (Essential Safety Rules)
 
-1. **Freeze Rule** — 이후 주차가 확정되면 과거 확정 주차는 동결(Swap/Pass 불가). 큐 재정렬은 미확정 차주 배정에만 영향.
+1. **Freeze / 지난 날짜** — 이후 주차 확정과 무관하게, 캘린더상 지난 요일은 교환 불가. 미래 요일은 주차 간 맞교환 가능.
 2. **Member Status** — 비활성화 시 통계 유지, Priority Queue에서 제외. 활성 최소 2명.
 3. **Data Backup** — localStorage 자동 저장 + JSON 내보내기/불러오기.
-4. **Emergency Pass** — 확정 주차에서 당일 호스트를 큐 순위 유지한 채 2순위 출근자에게 이관.

@@ -1,13 +1,20 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DAY_LABELS } from "../../constants/hosts";
 import { useScheduler } from "../../hooks/useScheduler";
-import { upsertNotionSchedules } from "../../api/notion";
+import {
+  fetchNotionSchedules,
+  upsertNotionSchedules,
+} from "../../api/notion";
 import {
   calcWorkRatio,
   createHostMap,
   formatAllSlackShares,
 } from "../../utils/scheduler";
-import { buildSchedulePayload } from "../../utils/notionSync";
+import {
+  buildSchedulePayload,
+  filterSchedulesByMonth,
+  getMonthRange,
+} from "../../utils/notionSync";
 import { ConfirmModal } from "../ConfirmModal/ConfirmModal";
 import { DateSearchForm } from "../DateSearchForm/DateSearchForm";
 import { HostManagementPanel } from "../HostManagementPanel/HostManagementPanel";
@@ -27,20 +34,13 @@ const ACTIVE_ERROR_MESSAGES = {
 };
 
 const SWAP_ERROR_MESSAGES = {
-  FROZEN: "동결된 과거 주차는 맞교환할 수 없습니다.",
   NOT_CONFIRMED: "확정된 주차만 맞교환할 수 있습니다.",
   SAME_HOST: "같은 호스트로는 교환할 수 없습니다.",
   NO_ASSIGNMENT: "해당 요일에 배정된 호스트가 없습니다.",
   NOT_FOUND: "상대 호스트를 찾을 수 없습니다.",
   INVALID_DAY: "유효하지 않은 요일입니다.",
-};
-
-const PASS_ERROR_MESSAGES = {
-  FROZEN: "동결된 과거 주차에는 당일 패스를 적용할 수 없습니다.",
-  NOT_CONFIRMED: "확정된 주차만 당일 패스가 가능합니다.",
-  NO_ASSIGNMENT: "배정된 호스트가 없습니다.",
-  NO_CANDIDATE: "이관할 2순위 출근자가 없습니다.",
-  INVALID_DAY: "유효하지 않은 요일입니다.",
+  DAY_PAST: "이미 지난 날짜는 교환할 수 없습니다.",
+  TARGET_DAY_PAST: "이미 지난 요일 담당자와는 교환할 수 없습니다.",
 };
 
 const IMPORT_ERROR_MESSAGES = {
@@ -54,12 +54,13 @@ async function syncWeeksToNotion(
   hosts,
   showToast,
   label = 'Notion 히스토리 동기화',
-  weekId = null,
+  weekIds = null,
 ) {
   const map = createHostMap(hosts);
   let payload = buildSchedulePayload(weeks, map);
-  if (weekId) {
-    payload = payload.filter((item) => item.weekKey === weekId);
+  if (weekIds != null) {
+    const idSet = new Set(Array.isArray(weekIds) ? weekIds : [weekIds]);
+    payload = payload.filter((item) => idSet.has(item.weekKey));
   }
   if (payload.length === 0) {
     showToast('업로드할 확정 주차가 없습니다.');
@@ -86,6 +87,7 @@ export function Dashboard() {
     weeks,
     hostMap,
     searchSchedule,
+    hydrateFromNotionSchedules,
     addHost,
     removeHost,
     canRemoveHost,
@@ -93,8 +95,6 @@ export function Dashboard() {
     updateAttendance,
     confirmAndAssignWeek,
     swapAssignments,
-    emergencyPass,
-    isWeekFrozen,
     resetAll,
     exportData,
     importData,
@@ -105,6 +105,7 @@ export function Dashboard() {
   const [isResetOpen, setIsResetOpen] = useState(false);
   const [notionBusy, setNotionBusy] = useState(false);
   const [historyTick, setHistoryTick] = useState(0);
+  const [monthBootstrapping, setMonthBootstrapping] = useState(true);
   const fileInputRef = useRef(null);
   const toastTimerRef = useRef(null);
 
@@ -115,6 +116,40 @@ export function Dashboard() {
     }
     toastTimerRef.current = window.setTimeout(() => setToast(null), 3200);
   };
+
+  // 첫 진입: 오늘 달 Notion 확정 기록이 있으면 화면에 hydrate
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      const { month } = getMonthRange();
+      try {
+        const data = await fetchNotionSchedules();
+        if (cancelled) return;
+
+        const monthSchedules = filterSchedulesByMonth(
+          data.schedules ?? [],
+          new Date(),
+        );
+        hydrateFromNotionSchedules(monthSchedules);
+
+        if (monthSchedules.length > 0) {
+          showToast(
+            `Notion ${month}월 확정 주차 ${monthSchedules.length}건을 불러왔습니다.`,
+          );
+        }
+      } catch {
+        // Notion 실패 시 localStorage weeks 유지
+      } finally {
+        if (!cancelled) setMonthBootstrapping(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 마운트 시 1회
+  }, []);
 
   const handlePushSchedules = async (label) => {
     setNotionBusy(true);
@@ -201,33 +236,7 @@ export function Dashboard() {
         result.snapshot.hosts,
         showToast,
         '맞교환 · Notion 동기화',
-        weekId,
-      );
-      if (data) setHistoryTick((n) => n + 1);
-    } finally {
-      setNotionBusy(false);
-    }
-  };
-
-  const handleEmergencyPass = async (weekId, day) => {
-    const result = emergencyPass(weekId, day);
-    if (result?.error) {
-      showToast(
-        PASS_ERROR_MESSAGES[result.error] ?? '당일 패스에 실패했습니다.',
-      );
-      return;
-    }
-    const from = hostMap.get(result.fromId)?.name ?? '?';
-    const to = hostMap.get(result.toId)?.name ?? '?';
-    showToast(`${DAY_LABELS[day]} 패스: ${from} → ${to}. Notion 동기화 중…`);
-    setNotionBusy(true);
-    try {
-      const data = await syncWeeksToNotion(
-        result.snapshot.weeks,
-        result.snapshot.hosts,
-        showToast,
-        '당일 패스 · Notion 동기화',
-        weekId,
+        result.affectedWeekIds ?? [weekId],
       );
       if (data) setHistoryTick((n) => n + 1);
     } finally {
@@ -353,11 +362,10 @@ export function Dashboard() {
             weeks={weeks}
             hosts={hosts}
             hostMap={hostMap}
-            isWeekFrozen={isWeekFrozen}
+            loading={monthBootstrapping}
             onUpdateAttendance={updateAttendance}
             onConfirm={handleConfirm}
             onSwap={handleSwap}
-            onEmergencyPass={handleEmergencyPass}
             onCopySlack={showToast}
           />
         </main>

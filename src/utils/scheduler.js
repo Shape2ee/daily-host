@@ -99,8 +99,41 @@ export function getAvailableDays(week) {
 }
 
 /**
- * Freeze Rule: 이후 확정 주차가 있으면 과거 확정 주차는 동결된다.
- * 동결된 주차는 Swap / Emergency Pass 불가.
+ * Week 구간에서 특정 요일(DayKey)에 해당하는 날짜를 반환한다.
+ */
+export function getDateForDay(week, dayKey) {
+  const cursor = toDateOnly(week.startDate);
+  const end = toDateOnly(week.endDate);
+
+  while (cursor <= end) {
+    if (DAY_INDEX_TO_KEY[cursor.getDay()] === dayKey) {
+      return toDateOnly(cursor);
+    }
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  return null;
+}
+
+/**
+ * 해당 요일의 캘린더 날짜가 오늘보다 이전인지 여부.
+ */
+export function isDayPast(week, dayKey, now = new Date()) {
+  const dayDate = getDateForDay(week, dayKey);
+  if (!dayDate) return true;
+  return dayDate.getTime() < toDateOnly(now).getTime();
+}
+
+/**
+ * 교환/패스 가능한(아직 지나지 않은) 요일만 반환한다.
+ */
+export function getSwappableDays(week, now = new Date()) {
+  return getAvailableDays(week).filter((day) => !isDayPast(week, day, now));
+}
+
+/**
+ * Freeze Rule: 이후 확정 주차가 있으면 과거 확정 주차로 표시한다.
+ * (교환 가능 여부는 지난 날짜 여부로 따로 판단한다.)
  */
 export function isWeekFrozen(weeks, weekId) {
   const index = weeks.findIndex((w) => w.id === weekId);
@@ -166,12 +199,20 @@ export function generateWeeks(startDateStr, endDateStr, hostIds) {
 }
 
 /**
- * 출근자 0명인 요일 목록을 반환한다.
+ * 활성 출근자가 0명인 요일 목록을 반환한다.
+ * 비활성 멤버의 체크만으로는 "출근 있음"으로 치지 않는다.
  */
-export function findEmptyAttendanceDays(week) {
+export function findEmptyAttendanceDays(week, hosts = []) {
+  const activeIds = getActiveHosts(hosts).map((h) => h.id);
+
   return getAvailableDays(week).filter((day) => {
     const record = week.attendance[day] ?? {};
-    return !Object.values(record).some(Boolean);
+
+    if (activeIds.length === 0) {
+      return true;
+    }
+
+    return !activeIds.some((id) => record[id] === true);
   });
 }
 
@@ -362,13 +403,24 @@ export function moveHostToQueueTail(queue, hostId) {
 /**
  * 단일 요일 자동 배정.
  * Queue 앞에서부터 탐색하여 당일 출근자 중 최우선 호스트를 선택한다.
+ * excludeHostId(직전 요일 배정자)는 연속 배정 방지를 위해 1차로 건너뛰고,
+ * 다른 출근자가 없을 때만 fallback으로 허용한다.
  */
-export function assignDay(queue, attendance, day) {
+export function assignDay(queue, attendance, day, excludeHostId) {
+  const dayAttendance = attendance[day] ?? {};
+
   for (const hostId of queue) {
-    if (attendance[day][hostId] === true) {
+    if (excludeHostId !== undefined && hostId === excludeHostId) continue;
+    if (dayAttendance[hostId] === true) {
       return hostId;
     }
   }
+
+  // 대안 출근자가 없으면 연속 배정 허용 (1명만 출근한 경우 등)
+  if (excludeHostId !== undefined && dayAttendance[excludeHostId] === true) {
+    return excludeHostId;
+  }
+
   return undefined;
 }
 
@@ -419,9 +471,10 @@ export function replayQueueAndCounts(hosts, baseQueue, weeks) {
 
 /**
  * 주차 자동 배정 + 확정.
+ * 요일 순회 시 직전 요일 배정자와 연속되지 않도록 우선 배정한다.
  */
 export function assignWeek(week, hosts, queue) {
-  const emptyDays = findEmptyAttendanceDays(week);
+  const emptyDays = findEmptyAttendanceDays(week, hosts);
   if (emptyDays.length > 0) {
     return {
       ok: false,
@@ -435,15 +488,24 @@ export function assignWeek(week, hosts, queue) {
   let nextHosts = hosts.map((h) => ({ ...h }));
   const assignments = {};
   const availableDays = getAvailableDays(week);
+  const failedDays = [];
+  let previousHostId;
 
   for (const day of availableDays) {
-    const hostId = assignDay(nextQueue, week.attendance, day);
+    const hostId = assignDay(
+      nextQueue,
+      week.attendance,
+      day,
+      previousHostId,
+    );
 
     if (hostId === undefined) {
+      failedDays.push(day);
       continue;
     }
 
     assignments[day] = hostId;
+    previousHostId = hostId;
 
     const dayAttendance = week.attendance[day] ?? {};
 
@@ -465,6 +527,14 @@ export function assignWeek(week, hosts, queue) {
     });
 
     nextQueue = moveHostToQueueTail(nextQueue, hostId);
+  }
+
+  if (failedDays.length > 0) {
+    return {
+      ok: false,
+      error: 'EMPTY_ATTENDANCE',
+      emptyDays: failedDays,
+    };
   }
 
   // 비활성 멤버는 큐 뒤에 다시 붙이지 않음 — activeQueue만 유지
@@ -494,12 +564,33 @@ export function findAssignedDay(week, hostId) {
 }
 
 /**
- * Freeze Rule 하에 교체/맞교환.
- * - day의 담당자를 targetHostId와 교환/교체
- * - target이 다른 요일에 배정돼 있으면 요일 맞교환
- * - target이 미배정이면 day 담당만 교체 (미배정 인원도 가능)
- * - 동결된 과거 주차는 변경 불가
- * - 이후 Replay로 큐/통계 재정렬 (미확정 차주 계산에 사용)
+ * 전체 주차에서 호스트 배정 슬롯을 찾는다.
+ * futureOnly면 아직 지나지 않은 날짜만 대상으로 한다.
+ */
+export function findHostAssignment(
+  weeks,
+  hostId,
+  { futureOnly = false, now = new Date() } = {},
+) {
+  for (const week of weeks) {
+    if (!week.confirmed) continue;
+
+    for (const day of getAvailableDays(week)) {
+      if (week.assignments[day] !== hostId) continue;
+      if (futureOnly && isDayPast(week, day, now)) continue;
+      return { weekId: week.id, day, week };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * 교체/맞교환.
+ * - 지난 캘린더 날짜 배정은 수정 불가
+ * - 이후 주차가 확정돼도, 미래 요일이면 주차 간 맞교환 가능
+ * - 상대가 미래 요일에 배정돼 있으면 그 슬롯과 맞교환
+ * - 상대가 미래 배정이 없으면 해당 요일만 교체
  */
 export function swapAssignments(
   weeks,
@@ -509,21 +600,21 @@ export function swapAssignments(
   hosts,
   baseQueue,
 ) {
-  if (isWeekFrozen(weeks, weekId)) {
-    return { ok: false, error: 'FROZEN' };
-  }
-
-  const target = weeks.find((w) => w.id === weekId);
-  if (!target || !target.confirmed) {
+  const sourceWeek = weeks.find((w) => w.id === weekId);
+  if (!sourceWeek || !sourceWeek.confirmed) {
     return { ok: false, error: 'NOT_CONFIRMED' };
   }
 
-  const availableDays = getAvailableDays(target);
+  const availableDays = getAvailableDays(sourceWeek);
   if (!availableDays.includes(day)) {
     return { ok: false, error: 'INVALID_DAY' };
   }
 
-  const originalId = target.assignments[day];
+  if (isDayPast(sourceWeek, day)) {
+    return { ok: false, error: 'DAY_PAST' };
+  }
+
+  const originalId = sourceWeek.assignments[day];
   if (originalId === undefined) {
     return { ok: false, error: 'NO_ASSIGNMENT' };
   }
@@ -538,27 +629,40 @@ export function swapAssignments(
   }
 
   const swapHostId = Number(targetHostId);
-  const otherDay = findAssignedDay(target, swapHostId);
+  const otherSlot = findHostAssignment(weeks, swapHostId, { futureOnly: true });
+
+  // 상대의 미래 배정이 같은 (week, day)면 동일 슬롯
+  if (
+    otherSlot &&
+    otherSlot.weekId === weekId &&
+    otherSlot.day === day
+  ) {
+    return { ok: false, error: 'SAME_HOST' };
+  }
+
+  const affectedWeekIds = new Set([weekId]);
+  if (otherSlot) {
+    affectedWeekIds.add(otherSlot.weekId);
+  }
 
   const nextWeeks = weeks.map((week) => {
-    if (week.id !== weekId) {
-      return week;
-    }
-
+    let changed = false;
     const nextAssignments = { ...week.assignments };
     const nextPasses = { ...(week.passes ?? {}) };
 
-    if (otherDay) {
-      // 둘 다 배정됨 → 요일 맞교환
-      nextAssignments[day] = swapHostId;
-      nextAssignments[otherDay] = originalId;
-      delete nextPasses[day];
-      delete nextPasses[otherDay];
-    } else {
-      // 미배정 인원 → 해당 요일만 교체
+    if (week.id === weekId) {
       nextAssignments[day] = swapHostId;
       delete nextPasses[day];
+      changed = true;
     }
+
+    if (otherSlot && week.id === otherSlot.weekId) {
+      nextAssignments[otherSlot.day] = originalId;
+      delete nextPasses[otherSlot.day];
+      changed = true;
+    }
+
+    if (!changed) return week;
 
     return {
       ...week,
@@ -574,92 +678,7 @@ export function swapAssignments(
     weeks: nextWeeks,
     hosts: replayed.hosts,
     queue: replayed.queue,
-  };
-}
-
-/**
- * Emergency Pass: 당일 호스트 부재 시 큐 순위는 유지한 채
- * 당일 출근자 중 2순위에게 호스트를 이관한다.
- */
-export function emergencyPass(weeks, weekId, day, hosts, queue) {
-  if (isWeekFrozen(weeks, weekId)) {
-    return { ok: false, error: 'FROZEN' };
-  }
-
-  const target = weeks.find((w) => w.id === weekId);
-  if (!target || !target.confirmed) {
-    return { ok: false, error: 'NOT_CONFIRMED' };
-  }
-
-  const availableDays = getAvailableDays(target);
-  if (!availableDays.includes(day)) {
-    return { ok: false, error: 'INVALID_DAY' };
-  }
-
-  const originalId = target.assignments[day];
-  if (originalId === undefined) {
-    return { ok: false, error: 'NO_ASSIGNMENT' };
-  }
-
-  const dayAttendance = target.attendance[day] ?? {};
-  const activeQueue = filterActiveQueue(queue, hosts);
-
-  // 당일 출근자를 현재 큐 순서로 정렬
-  const presentOrdered = activeQueue.filter(
-    (id) => dayAttendance[id] === true,
-  );
-
-  // 원 배정자가 출근 목록에 없어도, 2순위 후보를 찾기 위해
-  // "원 배정자 제외 후 큐 상위 출근자"를 이관 대상으로 본다.
-  const candidates = presentOrdered.filter((id) => id !== originalId);
-
-  if (candidates.length === 0) {
-    return { ok: false, error: 'NO_CANDIDATE' };
-  }
-
-  // 2순위: 출근자 큐 기준 차순위 (원 호스트 다음 출근자)
-  const originalIndex = presentOrdered.indexOf(originalId);
-  let nextId;
-  if (originalIndex >= 0 && originalIndex < presentOrdered.length - 1) {
-    nextId = presentOrdered[originalIndex + 1];
-  } else {
-    nextId = candidates[0];
-  }
-
-  const nextWeeks = weeks.map((week) => {
-    if (week.id !== weekId) return week;
-
-    return {
-      ...week,
-      assignments: {
-        ...week.assignments,
-        [day]: nextId,
-      },
-      passes: {
-        ...(week.passes ?? {}),
-        [day]: { fromId: originalId, toId: nextId },
-      },
-    };
-  });
-
-  // 큐 순위는 절대 변경하지 않음. count만 이관.
-  const nextHosts = hosts.map((host) => {
-    if (host.id === originalId) {
-      return { ...host, count: Math.max(0, host.count - 1) };
-    }
-    if (host.id === nextId) {
-      return { ...host, count: host.count + 1 };
-    }
-    return host;
-  });
-
-  return {
-    ok: true,
-    weeks: nextWeeks,
-    hosts: nextHosts,
-    queue: [...queue],
-    fromId: originalId,
-    toId: nextId,
+    affectedWeekIds: [...affectedWeekIds],
   };
 }
 
