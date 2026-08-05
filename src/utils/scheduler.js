@@ -425,6 +425,43 @@ export function assignDay(queue, attendance, day, excludeHostId) {
 }
 
 /**
+ * 확정 주차 배정만으로 count / totalWorkingDays를 재계산한다.
+ * (큐 순서는 변경하지 않는다 — Notion Priority가 소스)
+ */
+export function recountFromWeeks(hosts, weeks) {
+  let nextHosts = hosts.map((h) => ({
+    ...h,
+    count: 0,
+    totalWorkingDays: 0,
+  }));
+
+  for (const week of weeks) {
+    if (!week.confirmed) continue;
+
+    for (const day of getAvailableDays(week)) {
+      const dayAttendance = week.attendance[day] ?? {};
+
+      nextHosts = nextHosts.map((host) =>
+        dayAttendance[host.id] === true
+          ? { ...host, totalWorkingDays: host.totalWorkingDays + 1 }
+          : host,
+      );
+
+      const assignedId = week.assignments[day];
+      if (assignedId !== undefined) {
+        nextHosts = nextHosts.map((host) =>
+          host.id === assignedId
+            ? { ...host, count: host.count + 1 }
+            : host,
+        );
+      }
+    }
+  }
+
+  return nextHosts;
+}
+
+/**
  * 확정된 배정 결과를 1일차부터 순차 Replay하여
  * count / totalWorkingDays / priorityQueue를 재계산한다.
  * (동결된 과거 주차의 배정 결과 자체는 변경하지 않으며,

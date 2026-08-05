@@ -11,6 +11,8 @@
 | Name | Title | 호스트 이름 |
 | Active | Checkbox | 활성 여부 (꺼지면 앱 큐에서 제외) |
 | AppHostId | Number | 앱 내부 ID (매핑/upsert 키) |
+| Priority | Number | **현재** Priority Queue 순서 (0이 다음 배정) |
+| BasePriority | Number | 기준 큐 순서 (맞교환 replay용) |
 | Note | Rich text | 메모 (선택) |
 
 ### 2) `Daily Host · Schedule History` (확정 주차 히스토리)
@@ -47,8 +49,9 @@ API는 `api/index.js` → Express(`server/app.js`)로 동작하며, 프론트와
 
 | 버튼/이벤트 | 방향 | 내용 |
 |-------------|------|------|
-| 멤버 노션에 반영 | 앱 → Notion | AppHostId 기준 upsert |
-| 주차 확정 / 맞교환 / 패스 | 앱 → Notion | **자동** upsert |
+| 멤버 노션에 반영 | 앱 → Notion | AppHostId + Priority/BasePriority upsert |
+| 멤버 불러오기 / 앱 첫 진입 | Notion → 앱 hosts | Members 로드 (이름·Active·큐 순서) |
+| 주차 확정 / 맞교환 / 멤버 변경 | 앱 → Notion | 스케줄 upsert + **우선순위 자동 동기화** |
 | 확정 주차 업로드 (상단/패널) | 앱 → Notion | 수동 일괄 upsert |
 | 히스토리 조회 | Notion → 앱 모달 | 확정 이력 열람 |
 | 앱 첫 진입 | Notion → 앱 weeks | **당월** Period와 겹치는 확정 주차 hydrate (없으면 빈 화면) |

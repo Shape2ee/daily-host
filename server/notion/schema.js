@@ -2,7 +2,7 @@
  * Notion DB property helpers
  *
  * 권장 구조 (DB 2개):
- * 1) Members  — Name, Active, AppHostId, Note
+ * 1) Members  — Name, Active, AppHostId, Priority, BasePriority, Note
  * 2) Schedule History — Name, WeekKey, WeekNumber, Period,
  *    Monday~Thursday, SlackText, Status
  */

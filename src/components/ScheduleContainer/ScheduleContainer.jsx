@@ -19,7 +19,7 @@ export function ScheduleContainer({
       <div className={styles.empty}>
         <h3 className={styles.emptyTitle}>Notion 기록 확인 중…</h3>
         <p className={styles.emptyText}>
-          이번 달 확정 호스트 기록이 있는지 불러오고 있습니다.
+          멤버와 이번 달 확정 호스트 기록을 불러오고 있습니다.
         </p>
       </div>
     );

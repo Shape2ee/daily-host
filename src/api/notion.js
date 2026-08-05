@@ -28,6 +28,10 @@ export function fetchNotionHealth() {
   return request('/api/health');
 }
 
+export function fetchNotionMembers() {
+  return request('/api/notion/members');
+}
+
 export function pushNotionMembers(hosts) {
   return request('/api/notion/members/push', {
     method: 'POST',

@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
 import {
   fetchNotionHealth,
+  fetchNotionMembers,
   fetchNotionSchedules,
   pushNotionMembers,
 } from '../../api/notion';
+import { buildMembersPayload } from '../../utils/notionSync';
 import { HistoryModal } from '../HistoryModal/HistoryModal';
 import styles from './NotionSyncPanel.module.scss';
 
@@ -12,9 +14,12 @@ import styles from './NotionSyncPanel.module.scss';
  */
 export function NotionSyncPanel({
   hosts,
+  priorityQueue = [],
+  basePriorityQueue = [],
   busy = false,
   historyTick = 0,
   onPushSchedules,
+  onLoadMembers,
   onToast,
 }) {
   const [health, setHealth] = useState(null);
@@ -60,10 +65,27 @@ export function NotionSyncPanel({
     }
   };
 
+  const handlePullMembers = () =>
+    run(async () => {
+      const data = await fetchNotionMembers();
+      const members = data.members ?? [];
+      if (members.length === 0) {
+        onToast('Notion에 등록된 멤버가 없습니다.');
+        return;
+      }
+      await onLoadMembers?.(members);
+      onToast(`Notion 멤버 ${members.length}명 불러옴`);
+    });
+
   const handlePushMembers = () =>
     run(async () => {
-      const data = await pushNotionMembers(hosts);
-      onToast(`멤버 노션 반영 완료 · ${data.count}명`);
+      const payload = buildMembersPayload(
+        hosts,
+        priorityQueue,
+        basePriorityQueue,
+      );
+      const data = await pushNotionMembers(payload);
+      onToast(`멤버·우선순위 노션 반영 완료 · ${data.count}명`);
     });
 
   const handlePushSchedules = () =>
@@ -94,7 +116,7 @@ export function NotionSyncPanel({
           <div>
             <h2 className={styles.title}>Notion 동기화</h2>
             <p className={styles.subtitle}>
-              주차 확정 시 자동 동기화 · 멤버/히스토리 수동 반영
+              멤버·우선순위·당월 스케줄 공유 · 주차 확정 시 자동 동기화
             </p>
           </div>
           <span
@@ -111,9 +133,17 @@ export function NotionSyncPanel({
             type="button"
             className={styles.secondary}
             disabled={isBusy}
+            onClick={handlePullMembers}
+          >
+            멤버 불러오기
+          </button>
+          <button
+            type="button"
+            className={styles.secondary}
+            disabled={isBusy}
             onClick={handlePushMembers}
           >
-            멤버 노션에 반영
+            멤버·우선순위 반영
           </button>
           <button
             type="button"

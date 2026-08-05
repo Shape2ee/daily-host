@@ -66,8 +66,25 @@ function mapMemberPage(page) {
     name: plainText(props.Name),
     active: props.Active?.checkbox !== false,
     appHostId: props.AppHostId?.number ?? null,
+    priority: props.Priority?.number ?? null,
+    basePriority: props.BasePriority?.number ?? null,
     note: plainText(props.Note),
   };
+}
+
+export async function listMembers(notion, membersDbId) {
+  const pages = await queryAll(notion, membersDbId);
+  return pages
+    .map(mapMemberPage)
+    .filter((m) => Boolean(m.name))
+    .sort((a, b) => {
+      const aPri =
+        a.priority ?? a.basePriority ?? a.appHostId ?? Number.MAX_SAFE_INTEGER;
+      const bPri =
+        b.priority ?? b.basePriority ?? b.appHostId ?? Number.MAX_SAFE_INTEGER;
+      if (aPri !== bPri) return aPri - bPri;
+      return a.name.localeCompare(b.name, 'ko');
+    });
 }
 
 function mapSchedulePage(page) {
@@ -111,6 +128,8 @@ export async function upsertMember(notion, membersDbId, member) {
     Name: titleProp(member.name),
     Active: checkboxProp(member.active !== false),
     AppHostId: numberProp(member.appHostId),
+    Priority: numberProp(member.priority),
+    BasePriority: numberProp(member.basePriority),
     Note: richTextProp(member.note ?? ''),
   };
 

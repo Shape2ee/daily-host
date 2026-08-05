@@ -19,10 +19,14 @@ import {
   setHostActive as setHostActiveUtil,
   swapAssignments as swapAssignmentsUtil,
   replayQueueAndCounts,
+  recountFromWeeks,
   unlockNextWeek,
   updateAttendance as updateAttendanceUtil,
 } from '../utils/scheduler.js';
-import { notionSchedulesToWeeks } from '../utils/notionSync.js';
+import {
+  notionMembersToHosts,
+  notionSchedulesToWeeks,
+} from '../utils/notionSync.js';
 
 function loadState() {
   try {
@@ -98,46 +102,53 @@ export function useScheduler() {
   }, [patchState]);
 
   /**
-   * Notion 당월(또는 전달된) 스케줄로 weeks를 hydrate한다.
-   * 기록이 없으면 빈 리스트로 두고 횟수/큐를 초기화한다.
+   * Notion 멤버(+스케줄)로 앱 상태를 hydrate한다.
+   * - 큐 순서: Notion Priority / BasePriority 그대로 사용 (다른 세션과 동일)
+   * - 횟수: 전체 확정 스케줄로 recount
+   * - 화면 weeks: displaySchedules (당월) 기준
    */
-  const hydrateFromNotionSchedules = useCallback((schedules) => {
+  const hydrateFromNotion = useCallback((members, displaySchedules, allSchedules) => {
     patchState((prev) => {
-      const weeks = notionSchedulesToWeeks(schedules, prev.hosts);
+      let hosts = prev.hosts;
+      let priorityQueue = prev.priorityQueue;
+      let basePriorityQueue = prev.basePriorityQueue;
 
-      if (weeks.length === 0) {
-        return {
-          ...prev,
-          weeks: [],
-          hosts: prev.hosts.map((h) => ({
-            ...h,
-            count: 0,
-            totalWorkingDays: 0,
-          })),
-          priorityQueue: filterActiveQueue(
-            prev.basePriorityQueue,
-            prev.hosts,
-          ),
-        };
+      if (Array.isArray(members) && members.length > 0) {
+        const mapped = notionMembersToHosts(members, prev.hosts);
+        hosts = mapped.hosts;
+        priorityQueue = mapped.priorityQueue;
+        basePriorityQueue = mapped.basePriorityQueue;
       }
 
-      const replayed = replayQueueAndCounts(
-        prev.hosts,
-        prev.basePriorityQueue,
-        weeks,
-      );
+      const replaySource =
+        allSchedules !== undefined
+          ? allSchedules
+          : displaySchedules !== undefined
+            ? displaySchedules
+            : null;
+
+      const replaceWeeks = displaySchedules !== undefined;
+      const allWeeks =
+        replaySource != null
+          ? notionSchedulesToWeeks(replaySource ?? [], hosts)
+          : prev.weeks;
+      const weeks = replaceWeeks
+        ? notionSchedulesToWeeks(displaySchedules ?? [], hosts)
+        : prev.weeks;
+
+      const recounted = recountFromWeeks(hosts, allWeeks);
 
       return {
-        ...prev,
+        hosts: recounted,
+        priorityQueue: filterActiveQueue(priorityQueue, recounted),
+        basePriorityQueue,
         weeks,
-        hosts: replayed.hosts,
-        priorityQueue: replayed.queue,
       };
     });
   }, [patchState]);
 
   const addHost = useCallback((name) => {
-    patchState((prev) => {
+    const next = patchState((prev) => {
       const result = addHostUtil(
         prev.hosts,
         prev.priorityQueue,
@@ -152,6 +163,7 @@ export function useScheduler() {
         weeks: result.weeks,
       };
     });
+    return { ok: true, snapshot: next };
   }, [patchState]);
 
   const canRemoveHost = useCallback(
@@ -184,7 +196,7 @@ export function useScheduler() {
     );
 
     if (!result.ok) {
-      return result.error;
+      return { error: result.error };
     }
 
     commitState({
@@ -194,7 +206,15 @@ export function useScheduler() {
       weeks: result.weeks,
     });
 
-    return null;
+    return {
+      error: null,
+      snapshot: {
+        hosts: result.hosts,
+        priorityQueue: result.queue,
+        basePriorityQueue: result.baseQueue,
+        weeks: result.weeks,
+      },
+    };
   }, [commitState]);
 
   const setHostActive = useCallback((hostId, active) => {
@@ -208,17 +228,18 @@ export function useScheduler() {
     );
 
     if (!result.ok) {
-      return result.error;
+      return { error: result.error };
     }
 
-    commitState({
+    const snapshot = {
       ...prev,
       hosts: result.hosts,
       priorityQueue: result.queue,
       basePriorityQueue: result.baseQueue,
-    });
+    };
+    commitState(snapshot);
 
-    return null;
+    return { error: null, snapshot };
   }, [commitState]);
 
   const updateAttendance = useCallback((weekId, hostId, day, present) => {
@@ -301,12 +322,18 @@ export function useScheduler() {
       totalWorkingDays: 0,
     }));
 
-    commitState({
+    const snapshot = {
       hosts,
-      priorityQueue: prev.priorityQueue,
+      priorityQueue: filterActiveQueue(
+        prev.basePriorityQueue,
+        hosts,
+      ),
       basePriorityQueue: prev.basePriorityQueue,
       weeks: [],
-    });
+    };
+
+    commitState(snapshot);
+    return { ok: true, snapshot };
   }, [commitState]);
 
   /** JSON 파일로 내보내기 */
@@ -342,10 +369,11 @@ export function useScheduler() {
   return {
     hosts: state.hosts,
     priorityQueue: state.priorityQueue,
+    basePriorityQueue: state.basePriorityQueue,
     weeks: state.weeks,
     hostMap,
     searchSchedule,
-    hydrateFromNotionSchedules,
+    hydrateFromNotion,
     addHost,
     removeHost,
     canRemoveHost,

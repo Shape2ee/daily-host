@@ -87,6 +87,108 @@ function resolveHostIdByName(hosts, name) {
 }
 
 /**
+ * Notion Members → 앱 hosts / queue 변환.
+ * Priority = 현재 큐 순서, BasePriority = 기준 큐 순서 (없으면 AppHostId).
+ */
+export function notionMembersToHosts(members, previousHosts = []) {
+  const usedIds = new Set();
+  let nextAutoId =
+    previousHosts.length > 0
+      ? Math.max(...previousHosts.map((h) => Number(h.id) || 0), 0) + 1
+      : 1;
+
+  const hosts = [];
+
+  for (const member of members ?? []) {
+    const name = String(member.name ?? '').trim();
+    if (!name) continue;
+
+    let id =
+      member.appHostId != null && Number.isFinite(Number(member.appHostId))
+        ? Number(member.appHostId)
+        : null;
+
+    if (id == null || id <= 0 || usedIds.has(id)) {
+      const prevByName = previousHosts.find((h) => h.name === name);
+      if (
+        prevByName &&
+        !usedIds.has(prevByName.id) &&
+        (id == null || id <= 0)
+      ) {
+        id = prevByName.id;
+      } else {
+        while (usedIds.has(nextAutoId)) nextAutoId += 1;
+        id = nextAutoId;
+        nextAutoId += 1;
+      }
+    }
+
+    usedIds.add(id);
+    hosts.push({
+      id,
+      name,
+      count: 0,
+      totalWorkingDays: 0,
+      active: member.active !== false,
+      notionPageId: member.notionPageId ?? null,
+      note: member.note ?? '',
+      _priority: member.priority ?? null,
+      _basePriority: member.basePriority ?? null,
+    });
+  }
+
+  const byBase = [...hosts].sort((a, b) => {
+    const aHas = a._basePriority != null;
+    const bHas = b._basePriority != null;
+    if (aHas && bHas) return a._basePriority - b._basePriority;
+    if (aHas) return -1;
+    if (bHas) return 1;
+    return a.id - b.id;
+  });
+
+  const byPriority = [...hosts].sort((a, b) => {
+    const aHas = a._priority != null;
+    const bHas = b._priority != null;
+    if (aHas && bHas) return a._priority - b._priority;
+    if (aHas) return -1;
+    if (bHas) return 1;
+    const av = a._basePriority ?? a.id;
+    const bv = b._basePriority ?? b.id;
+    return Number(av) - Number(bv);
+  });
+
+  const basePriorityQueue = byBase.map((h) => h.id);
+  const priorityQueue = byPriority
+    .filter((h) => h.active !== false)
+    .map((h) => h.id);
+
+  return {
+    hosts: hosts.map(({ _priority, _basePriority, ...rest }) => rest),
+    priorityQueue,
+    basePriorityQueue,
+  };
+}
+
+/**
+ * 앱 상태를 Notion Members upsert 페이로드로 변환한다.
+ * Priority/BasePriority에 큐 인덱스를 실어 다른 세션과 순서를 맞춘다.
+ */
+export function buildMembersPayload(hosts, priorityQueue, basePriorityQueue) {
+  return hosts.map((host) => {
+    const priorityIdx = priorityQueue.indexOf(host.id);
+    const baseIdx = basePriorityQueue.indexOf(host.id);
+    return {
+      id: host.id,
+      name: host.name,
+      active: host.active !== false,
+      note: host.note ?? '',
+      priority: priorityIdx >= 0 ? priorityIdx : null,
+      basePriority: baseIdx >= 0 ? baseIdx : null,
+    };
+  });
+}
+
+/**
  * Notion Schedule History → 앱 Week[] (확정 상태) 변환.
  * 호스트 이름은 현재 hosts 목록과 매칭한다.
  */

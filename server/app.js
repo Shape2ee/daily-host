@@ -8,6 +8,7 @@ import {
   archiveSchedules,
   createNotionClient,
   getConfig,
+  listMembers,
   listSchedules,
   upsertMember,
   upsertSchedule,
@@ -50,6 +51,8 @@ export function createApp() {
           name: host.name,
           active: host.active !== false,
           appHostId: host.id,
+          priority: host.priority,
+          basePriority: host.basePriority,
           note: host.note ?? '',
         });
         results.push(saved);
@@ -60,6 +63,20 @@ export function createApp() {
       res.status(error.status || 500).json({
         ok: false,
         error: error.message || '멤버 업로드 실패',
+      });
+    }
+  });
+
+  app.get('/api/notion/members', async (_req, res) => {
+    try {
+      const config = assertConfigured('members');
+      const notion = createNotionClient(config.token);
+      const members = await listMembers(notion, config.membersDbId);
+      res.json({ ok: true, members, count: members.length });
+    } catch (error) {
+      res.status(error.status || 500).json({
+        ok: false,
+        error: error.message || '멤버 조회 실패',
       });
     }
   });
