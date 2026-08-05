@@ -24,7 +24,8 @@ Notion 연동은 [docs/NOTION.md](./docs/NOTION.md) 참고.
 
 ## Vercel 배포 (프론트 + API 한곳)
 
-이 프로젝트는 Vite 프론트와 Notion API(`api/`)를 **Vercel 하나**에서 같이 돌립니다.
+이 프로젝트는 Vite 프론트와 Notion API(`api/index.js`)를 **Vercel 하나**에서 같이 돌립니다.
+`vercel.json`의 rewrite가 `/api/*`를 Express 엔트리로 넘깁니다. (Vite에선 `[...path]` catch-all 미지원)
 
 1. GitHub에 푸시 후 [Vercel](https://vercel.com)에서 Import
 2. Framework Preset: **Vite** (자동 감지)
@@ -36,7 +37,7 @@ Notion 연동은 [docs/NOTION.md](./docs/NOTION.md) 참고.
 | `NOTION_MEMBERS_DB_ID` | Members DB ID |
 | `NOTION_SCHEDULE_DB_ID` | Schedule History DB ID |
 
-4. 배포 URL에서 Notion 동기화 상태(연결됨) 확인
+4. 배포 URL에서 `/api/health` 호출 또는 Notion 동기화 상태(연결됨) 확인
 
 로컬은 기존처럼 `npm run dev`(Vite 프록시 → `localhost:3001`)를 사용합니다.
 
