@@ -156,31 +156,10 @@ export function useScheduler() {
       let basePriorityQueue = prev.basePriorityQueue;
 
       if (Array.isArray(members) && members.length > 0) {
+        // Notion 멤버가 소스 오브 트루스 — 로컬 샘플/잔존 멤버와 합치지 않음
         const mapped = notionMembersToHosts(members, prev.hosts);
         hosts = mapped.hosts;
         basePriorityQueue = mapped.basePriorityQueue;
-
-        // Notion에 아직 없는 로컬 전용 멤버는 유지 (동기화 실패 후 새로고침 대비)
-        const mappedIds = new Set(mapped.hosts.map((h) => h.id));
-        const mappedNames = new Set(
-          mapped.hosts.map((h) => String(h.name).trim().toLowerCase()),
-        );
-        const localOnly = prev.hosts.filter((h) => {
-          const nameKey = String(h.name ?? '').trim().toLowerCase();
-          return !mappedIds.has(h.id) && !mappedNames.has(nameKey);
-        });
-
-        if (localOnly.length > 0) {
-          hosts = [...hosts, ...localOnly];
-          for (const host of localOnly) {
-            if (
-              host.active !== false &&
-              !basePriorityQueue.includes(host.id)
-            ) {
-              basePriorityQueue = [...basePriorityQueue, host.id];
-            }
-          }
-        }
 
         // Notion Active 상태 기준으로 재활성 Soft Reset
         const prevById = new Map(prev.hosts.map((h) => [h.id, h]));
@@ -190,14 +169,6 @@ export function useScheduler() {
           const prevHost = prevById.get(h.id);
           const wasInactive = prevHost?.active === false;
           const nowActive = h.active !== false;
-
-          // 로컬 전용 멤버는 Notion Active 토글 대상이 아니므로 플래그 유지
-          if (localOnly.some((x) => x.id === h.id)) {
-            return {
-              ...h,
-              softResetPending: Boolean(prevHost?.softResetPending),
-            };
-          }
 
           if (wasInactive && nowActive) {
             reactivatedIds.push(h.id);
