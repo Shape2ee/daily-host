@@ -11,6 +11,7 @@ import styles from './NotionSyncPanel.module.scss';
 
 /**
  * Notion 멤버/확정주차 동기화 패널.
+ * 멤버 불러오기 시 확정 Schedule도 함께 가져와 Replay에 사용한다.
  */
 export function NotionSyncPanel({
   hosts,
@@ -19,6 +20,7 @@ export function NotionSyncPanel({
   busy = false,
   historyTick = 0,
   onPushSchedules,
+  /** @type {(members: object[], schedules?: object[]) => void | Promise<void>} */
   onLoadMembers,
   onToast,
 }) {
@@ -67,14 +69,26 @@ export function NotionSyncPanel({
 
   const handlePullMembers = () =>
     run(async () => {
-      const data = await fetchNotionMembers();
-      const members = data.members ?? [];
+      const [membersResult, schedulesResult] = await Promise.all([
+        fetchNotionMembers(),
+        fetchNotionSchedules(),
+      ]);
+      const members = membersResult.members ?? [];
       if (members.length === 0) {
         onToast('Notion에 등록된 멤버가 없습니다.');
         return;
       }
-      await onLoadMembers?.(members);
-      onToast(`Notion 멤버 ${members.length}명 불러옴`);
+      const schedules = schedulesResult.schedules ?? [];
+      await onLoadMembers?.(members, schedules);
+      const activeCount = members.filter((m) => m.active !== false).length;
+      const inactiveCount = members.length - activeCount;
+      const schedulePart =
+        schedules.length > 0
+          ? ` · 확정 스케줄 ${schedules.length}건 Replay`
+          : '';
+      onToast(
+        `Notion 멤버 ${members.length}명 불러옴 (Active ${activeCount} / InActive ${inactiveCount})${schedulePart}`,
+      );
     });
 
   const handlePushMembers = () =>
@@ -85,7 +99,7 @@ export function NotionSyncPanel({
         basePriorityQueue,
       );
       const data = await pushNotionMembers(payload);
-      onToast(`멤버·우선순위 노션 반영 완료 · ${data.count}명`);
+      onToast(`멤버·Active·우선순위 Notion 반영 완료 · ${data.count}명`);
     });
 
   const handlePushSchedules = () =>
@@ -116,7 +130,7 @@ export function NotionSyncPanel({
           <div>
             <h2 className={styles.title}>Notion 동기화</h2>
             <p className={styles.subtitle}>
-              멤버·우선순위·당월 스케줄 공유 · 주차 확정 시 자동 동기화
+              Active·우선순위·당월 스케줄 양방향 동기화 · 주차 확정 시 자동 반영
             </p>
           </div>
           <span
@@ -135,7 +149,7 @@ export function NotionSyncPanel({
             disabled={isBusy}
             onClick={handlePullMembers}
           >
-            멤버 불러오기
+            멤버·Active 불러오기
           </button>
           <button
             type="button"
@@ -143,7 +157,7 @@ export function NotionSyncPanel({
             disabled={isBusy}
             onClick={handlePushMembers}
           >
-            멤버·우선순위 반영
+            멤버·Active·우선순위 반영
           </button>
           <button
             type="button"

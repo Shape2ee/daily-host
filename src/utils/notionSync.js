@@ -4,8 +4,61 @@ import {
   formatDate,
   formatSlackShare,
   getAvailableDays,
+  getMondayOfWeek,
   parseDate,
 } from './scheduler.js';
+
+/**
+ * 주차 attendance → Notion Attendance(JSON) 문자열.
+ * 예: {"monday":["홍길동","김철수"],"tuesday":[...],...}
+ */
+function serializeAttendance(weekAttendance, hostMap) {
+  if (!weekAttendance || typeof weekAttendance !== 'object') return '';
+
+  const payload = {};
+  for (const day of DAY_KEYS) {
+    const dayAttendance = weekAttendance[day] ?? {};
+    payload[day] = Object.entries(dayAttendance)
+      .filter(([, present]) => present === true)
+      .map(([hostId]) => hostMap.get(Number(hostId))?.name ?? '')
+      .filter(Boolean);
+  }
+  return JSON.stringify(payload);
+}
+
+/**
+ * Notion Attendance(JSON) → 앱 attendance.
+ * 비어 있거나 파싱 실패면 null (레거시: 전원 출근 유지).
+ */
+function deserializeAttendance(text, hosts) {
+  const trimmed = String(text ?? '').trim();
+  if (!trimmed) return null;
+
+  let parsed;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return null;
+  }
+
+  const attendance = {};
+  for (const day of DAY_KEYS) {
+    const names = Array.isArray(parsed[day]) ? parsed[day] : [];
+    const presentIds = new Set();
+    for (const name of names) {
+      const hostId = resolveHostIdByName(hosts, name);
+      if (hostId !== undefined) presentIds.add(hostId);
+    }
+    attendance[day] = {};
+    for (const host of hosts) {
+      attendance[day][host.id] = presentIds.has(host.id);
+    }
+  }
+  return attendance;
+}
 
 /**
  * 확정 주차를 Notion upsert 페이로드로 변환한다.
@@ -15,7 +68,6 @@ export function buildSchedulePayload(weeks, hostMap) {
     .map((week, index) => {
       if (!week.confirmed) return null;
 
-      const weekNumber = index + 1;
       const dayNames = {};
       for (const day of DAY_KEYS) {
         const hostId = week.assignments[day];
@@ -29,17 +81,21 @@ export function buildSchedulePayload(weeks, hostMap) {
       const hasAny = available.some((d) => week.assignments[d] !== undefined);
       if (!hasAny) return null;
 
+      const period = `${formatDate(week.startDate)}~${formatDate(week.endDate)}`;
+      const mondayKey = formatDate(getMondayOfWeek(week.startDate));
+
       return {
-        weekKey: week.id,
-        weekNumber,
-        name: `${weekNumber}주차 ${formatDate(week.startDate)}~${formatDate(week.endDate)}`,
+        weekKey: mondayKey || week.id,
+        weekNumber: index + 1,
+        name: period,
         startDate: formatDate(week.startDate),
         endDate: formatDate(week.endDate),
         monday: dayNames.monday,
         tuesday: dayNames.tuesday,
         wednesday: dayNames.wednesday,
         thursday: dayNames.thursday,
-        slackText: formatSlackShare(week, weekNumber, hostMap),
+        attendance: serializeAttendance(week.attendance, hostMap),
+        slackText: formatSlackShare(week, hostMap),
       };
     })
     .filter(Boolean);
@@ -66,12 +122,20 @@ export function getMonthRange(baseDate = new Date()) {
  */
 export function filterSchedulesByMonth(schedules, baseDate = new Date()) {
   const { start: monthStart, end: monthEnd } = getMonthRange(baseDate);
+  return filterSchedulesByDateRange(schedules, monthStart, monthEnd);
+}
+
+/**
+ * Notion 스케줄 중 Period가 start~end 와 겹치는 항목만 남긴다.
+ */
+export function filterSchedulesByDateRange(schedules, rangeStart, rangeEnd) {
+  if (!rangeStart || !rangeEnd) return [];
 
   return (schedules ?? []).filter((item) => {
     const start = item.startDate || item.endDate;
     const end = item.endDate || item.startDate;
     if (!start) return false;
-    return start <= monthEnd && end >= monthStart;
+    return start <= rangeEnd && end >= rangeStart;
   });
 }
 
@@ -79,11 +143,18 @@ function resolveHostIdByName(hosts, name) {
   const trimmed = String(name ?? '').trim();
   if (!trimmed) return undefined;
 
-  const exact = hosts.find((h) => h.name === trimmed);
-  if (exact) return exact.id;
-
   const lower = trimmed.toLowerCase();
-  return hosts.find((h) => h.name.toLowerCase() === lower)?.id;
+  const matches = hosts.filter(
+    (h) => h.name === trimmed || h.name.toLowerCase() === lower,
+  );
+
+  if (matches.length === 0) return undefined;
+  if (matches.length === 1) return matches[0].id;
+
+  // 동명이면 활성 멤버 우선 (완전 해소는 불가 — 추가 시 중복명 차단)
+  const active = matches.filter((h) => h.active !== false);
+  if (active.length === 1) return active[0].id;
+  return (active[0] ?? matches[0]).id;
 }
 
 /**
@@ -157,7 +228,10 @@ export function notionMembersToHosts(members, previousHosts = []) {
     return Number(av) - Number(bv);
   });
 
-  const basePriorityQueue = byBase.map((h) => h.id);
+  // 비활성은 기준/현재 큐 모두에서 제외 (로컬 setHostActive와 정책 통일)
+  const basePriorityQueue = byBase
+    .filter((h) => h.active !== false)
+    .map((h) => h.id);
   const priorityQueue = byPriority
     .filter((h) => h.active !== false)
     .map((h) => h.id);
@@ -191,6 +265,7 @@ export function buildMembersPayload(hosts, priorityQueue, basePriorityQueue) {
 /**
  * Notion Schedule History → 앱 Week[] (확정 상태) 변환.
  * 호스트 이름은 현재 hosts 목록과 매칭한다.
+ * Attendance(JSON)가 있으면 복원하고, 없으면(레거시) 전원 출근으로 둔다.
  */
 export function notionSchedulesToWeeks(schedules, hosts) {
   const hostIds = hosts.map((h) => h.id);
@@ -201,6 +276,9 @@ export function notionSchedulesToWeeks(schedules, hosts) {
       const endDate = parseDate(item.endDate || item.startDate);
       if (!startDate || !endDate) return null;
 
+      const mondayKey = formatDate(getMondayOfWeek(startDate));
+      if (!mondayKey) return null;
+
       const assignments = {};
       for (const day of DAY_KEYS) {
         const hostId = resolveHostIdByName(hosts, item[day]);
@@ -209,23 +287,44 @@ export function notionSchedulesToWeeks(schedules, hosts) {
         }
       }
 
+      const restored = deserializeAttendance(item.attendance, hosts);
+      const legacyKey = String(item.weekKey ?? '');
+      const keyIsStable = legacyKey === mondayKey;
+
       return {
-        id: item.weekKey || `week-notion-${formatDate(startDate)}`,
+        id: mondayKey,
         startDate,
         endDate,
-        attendance: createDefaultAttendance(hostIds),
+        attendance: restored ?? createDefaultAttendance(hostIds),
         assignments,
         passes: {},
         confirmed: true,
         isLocked: false,
         weekNumber: item.weekNumber ?? null,
+        _keyIsStable: keyIsStable,
       };
     })
     .filter(Boolean)
     .sort((a, b) => a.startDate.getTime() - b.startDate.getTime());
 
-  return weeks.map((week) => ({
-    ...week,
-    isLocked: false,
-  }));
+  const unique = [];
+  const seen = new Set();
+  for (const week of weeks) {
+    if (seen.has(week.id)) {
+      // 동일 월요일이 여러 개면 안정 weekKey(=월요일)인 쪽을 우선
+      if (week._keyIsStable) {
+        const idx = unique.findIndex((w) => w.id === week.id);
+        if (idx >= 0) {
+          const { _keyIsStable, ...rest } = week;
+          unique[idx] = rest;
+        }
+      }
+      continue;
+    }
+    seen.add(week.id);
+    const { _keyIsStable, ...rest } = week;
+    unique.push(rest);
+  }
+
+  return unique;
 }

@@ -4,7 +4,7 @@
  * 권장 구조 (DB 2개):
  * 1) Members  — Name, Active, AppHostId, Priority(Number), BasePriority(Number), Note
  * 2) Schedule History — Name, WeekKey, WeekNumber, Period,
- *    Monday~Thursday, SlackText, Status
+ *    Monday~Thursday, Attendance, SlackText, Status
  */
 
 export function plainText(prop) {

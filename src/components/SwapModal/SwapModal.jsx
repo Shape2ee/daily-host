@@ -17,7 +17,6 @@ import styles from './SwapModal.module.scss';
 export function SwapModal({
   week,
   weeks = [],
-  weekNumber,
   hosts,
   hostMap,
   onClose,
@@ -28,17 +27,13 @@ export function SwapModal({
   const weekHosts = useMemo(
     () =>
       hosts.filter((host) =>
-        Object.prototype.hasOwnProperty.call(week.attendance.monday, host.id),
+        Object.prototype.hasOwnProperty.call(
+          week.attendance?.monday ?? {},
+          host.id,
+        ),
       ),
     [hosts, week],
   );
-
-  const weekIndexById = useMemo(() => {
-    const list = weeks.length > 0 ? weeks : [week];
-    const map = new Map();
-    list.forEach((w, index) => map.set(w.id, index + 1));
-    return map;
-  }, [weeks, week]);
 
   const [day, setDay] = useState(swappableDays[0]);
   const currentHostId = day ? week.assignments[day] : undefined;
@@ -62,10 +57,9 @@ export function SwapModal({
 
   const describeSlot = (slot) => {
     if (!slot) return '미배정';
-    const n = weekIndexById.get(slot.weekId) ?? '?';
     const date = getDateForDay(slot.week, slot.day);
     const dateLabel = date ? formatDate(date) : DAY_LABELS[slot.day];
-    return `${n}주차 ${DAY_LABELS[slot.day]} (${dateLabel})`;
+    return `${DAY_LABELS[slot.day]} (${dateLabel})`;
   };
 
   const describeCandidate = (host) => {
@@ -99,8 +93,9 @@ export function SwapModal({
       ? findHostAssignment(lookupWeeks, effectiveTargetId, { futureOnly: true })
       : null;
 
+  const sourceDate = day ? getDateForDay(week, day) : null;
   const sourceLabel = day
-    ? `${weekNumber ?? weekIndexById.get(week.id) ?? '?'}주차 ${DAY_LABELS[day]}`
+    ? `${DAY_LABELS[day]}${sourceDate ? ` (${formatDate(sourceDate)})` : ''}`
     : '';
 
   return (

@@ -101,6 +101,7 @@ function mapSchedulePage(page) {
     tuesday: plainText(props.Tuesday),
     wednesday: plainText(props.Wednesday),
     thursday: plainText(props.Thursday),
+    attendance: plainText(props.Attendance),
     slackText: plainText(props.SlackText),
     status: props.Status?.select?.name ?? null,
   };
@@ -190,10 +191,23 @@ export async function archiveSchedules(
 }
 
 export async function upsertSchedule(notion, scheduleDbId, week) {
-  const existing = await queryAll(notion, scheduleDbId, {
+  let existing = await queryAll(notion, scheduleDbId, {
     property: 'WeekKey',
     rich_text: { equals: week.weekKey },
   });
+
+  // 레거시 weekKey(week-N-YYYY-MM-DD) → 월요일 키 마이그레이션:
+  // WeekKey 미스 시 동일 Period 시작일로 기존 페이지를 찾아 갱신한다.
+  if (!existing[0] && week.startDate) {
+    const byPeriod = await queryAll(notion, scheduleDbId, {
+      property: 'Period',
+      date: { equals: week.startDate },
+    });
+    existing = byPeriod.filter((page) => {
+      const period = page.properties?.Period?.date;
+      return period?.start === week.startDate;
+    });
+  }
 
   const properties = {
     Name: titleProp(week.name),
@@ -204,6 +218,7 @@ export async function upsertSchedule(notion, scheduleDbId, week) {
     Tuesday: richTextProp(week.tuesday ?? ''),
     Wednesday: richTextProp(week.wednesday ?? ''),
     Thursday: richTextProp(week.thursday ?? ''),
+    Attendance: richTextProp(week.attendance ?? ''),
     SlackText: richTextProp(week.slackText ?? ''),
     Status: selectProp(existing[0] ? 'Updated' : 'Confirmed'),
   };

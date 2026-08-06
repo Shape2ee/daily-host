@@ -4,6 +4,9 @@ export const MIN_HOST_COUNT = 2;
 /** localStorage 키 */
 export const STORAGE_KEY = 'daily-host-scheduler-pro';
 
+/** Notion 미동기화 변경사항 플래그 */
+export const NOTION_PENDING_KEY = 'daily-host-notion-pending';
+
 /** 초기 호스트 샘플 데이터 */
 export const INITIAL_HOSTS = [
   { id: 1, name: '홍길동', count: 0, totalWorkingDays: 0, active: true, notionPageId: null },

@@ -39,12 +39,11 @@ export function ScheduleContainer({
 
   return (
     <div className={styles.list}>
-      {weeks.map((week, index) => (
+      {weeks.map((week) => (
         <WeekSection
           key={week.id}
           week={week}
           weeks={weeks}
-          weekNumber={index + 1}
           hosts={hosts}
           hostMap={hostMap}
           onUpdateAttendance={onUpdateAttendance}

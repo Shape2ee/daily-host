@@ -56,12 +56,70 @@ function toDateOnly(date) {
 /**
  * 해당 날짜가 속한 주의 월요일을 반환한다.
  */
-function getMondayOfWeek(date) {
+export function getMondayOfWeek(date) {
   const d = toDateOnly(date);
   const day = d.getDay();
   const diff = day === 0 ? -6 : 1 - day;
   d.setDate(d.getDate() + diff);
   return d;
+}
+
+/**
+ * 캘린더 주차 키(해당 주 월요일 YYYY-MM-DD).
+ * week.id 는 조회 구간에 따라 달라질 수 있어 매칭용으로 쓴다.
+ */
+export function getWeekMondayKey(week) {
+  if (!week?.startDate) return '';
+  return formatDate(getMondayOfWeek(week.startDate));
+}
+
+/**
+ * 연속 확정 규칙에 맞게 isLocked 를 재계산한다.
+ * — 앞선 모든 주차가 확정된 경우에만 다음 미확정 주차를 연다.
+ *   (중간에만 확정 이력이 병합돼도 앞주 미확정 시 뒤주를 열지 않음)
+ */
+export function applySequentialLocks(weeks) {
+  let allPrevConfirmed = true;
+
+  return weeks.map((week) => {
+    const isLocked = !allPrevConfirmed;
+    if (!week.confirmed) {
+      allPrevConfirmed = false;
+    }
+    return { ...week, isLocked };
+  });
+}
+
+/**
+ * 새로 생성한 주차 골격에 기존/외부 확정 주차를 병합한다.
+ * 같은 캘린더 주차(월요일 기준)면 확정 기록을 우선한다.
+ */
+export function mergeConfirmedIntoWeeks(generatedWeeks, confirmedSources = []) {
+  const confirmedByKey = new Map();
+
+  for (const source of confirmedSources) {
+    if (!Array.isArray(source)) continue;
+    for (const week of source) {
+      if (!week?.confirmed) continue;
+      const key = getWeekMondayKey(week);
+      if (!key || confirmedByKey.has(key)) continue;
+      confirmedByKey.set(key, week);
+    }
+  }
+
+  const merged = generatedWeeks.map((generated) => {
+    const mondayKey = getWeekMondayKey(generated);
+    const confirmed = confirmedByKey.get(mondayKey);
+    if (!confirmed) return generated;
+
+    // Notion upsert 키가 조회 구간 index에 묶이지 않도록 월요일 키로 정규화
+    return {
+      ...confirmed,
+      id: mondayKey || confirmed.id,
+    };
+  });
+
+  return applySequentialLocks(merged);
 }
 
 /**
@@ -178,11 +236,12 @@ export function generateWeeks(startDateStr, endDateStr, hostIds) {
   const weeks = [];
   let index = 0;
 
-  for (const [, dates] of weekMap) {
+  for (const [mondayKey, dates] of weekMap) {
     dates.sort((a, b) => a.getTime() - b.getTime());
 
     weeks.push({
-      id: `week-${index + 1}-${formatDate(dates[0])}`,
+      // 조회 구간과 무관한 안정 키 (해당 주 월요일 YYYY-MM-DD)
+      id: mondayKey,
       startDate: dates[0],
       endDate: dates[dates.length - 1],
       attendance: createDefaultAttendance(hostIds),
@@ -195,7 +254,7 @@ export function generateWeeks(startDateStr, endDateStr, hostIds) {
     index += 1;
   }
 
-  return weeks;
+  return applySequentialLocks(weeks);
 }
 
 /**
@@ -206,7 +265,7 @@ export function findEmptyAttendanceDays(week, hosts = []) {
   const activeIds = getActiveHosts(hosts).map((h) => h.id);
 
   return getAvailableDays(week).filter((day) => {
-    const record = week.attendance[day] ?? {};
+    const record = week.attendance?.[day] ?? {};
 
     if (activeIds.length === 0) {
       return true;
@@ -222,7 +281,21 @@ export function findEmptyAttendanceDays(week, hosts = []) {
 export function addHost(hosts, queue, baseQueue, weeks, name) {
   const trimmed = name.trim();
   if (!trimmed) {
-    return { hosts, queue, baseQueue, weeks };
+    return { ok: false, error: 'EMPTY_NAME', hosts, queue, baseQueue, weeks };
+  }
+
+  const duplicated = hosts.some(
+    (h) => h.name.trim().toLowerCase() === trimmed.toLowerCase(),
+  );
+  if (duplicated) {
+    return {
+      ok: false,
+      error: 'DUPLICATE_NAME',
+      hosts,
+      queue,
+      baseQueue,
+      weeks,
+    };
   }
 
   const nextId =
@@ -254,6 +327,7 @@ export function addHost(hosts, queue, baseQueue, weeks, name) {
   });
 
   return {
+    ok: true,
     hosts: [...hosts, newHost],
     queue: [...queue, nextId],
     baseQueue: [...baseQueue, nextId],
@@ -326,9 +400,74 @@ export function removeHost(hosts, queue, baseQueue, weeks, hostId) {
 }
 
 /**
+ * 활성 멤버들의 평균 큐 인덱스에 hostId를 삽입한다.
+ * (숫자 priority 필드 대신 Queue 순서가 Priority 역할을 한다.)
+ * - Active 0명: 맨 뒤(length)에 삽입
+ * - Active 1명: 기존 1위 유지를 위해 최소 인덱스 1
+ * @returns {{ queue: number[], averageIndex: number }}
+ */
+export function insertAtAveragePriority(queue, hostId, activePeerIds) {
+  const without = queue.filter((id) => id !== hostId);
+
+  if (!activePeerIds || activePeerIds.length === 0) {
+    const averageIndex = without.length;
+    return { queue: [...without, hostId], averageIndex };
+  }
+
+  const indices = activePeerIds
+    .map((id) => without.indexOf(id))
+    .filter((index) => index >= 0);
+
+  if (indices.length === 0) {
+    const averageIndex = without.length;
+    return { queue: [...without, hostId], averageIndex };
+  }
+
+  let averageIndex = Math.round(
+    indices.reduce((sum, index) => sum + index, 0) / indices.length,
+  );
+
+  // Active 1명일 때 복귀자가 1위를 뺏지 않도록 최소 2위(index 1)
+  if (activePeerIds.length === 1) {
+    averageIndex = Math.max(1, averageIndex);
+  }
+
+  const clamped = Math.max(0, Math.min(averageIndex, without.length));
+  const next = [...without];
+  next.splice(clamped, 0, hostId);
+  return { queue: next, averageIndex: clamped };
+}
+
+/**
+ * softResetPending 멤버를 현재 큐의 평균 위치에 다시 삽입한다.
+ */
+export function applySoftResetToQueue(queue, hosts) {
+  const pendingIds = hosts
+    .filter((h) => h.active !== false && h.softResetPending)
+    .map((h) => h.id);
+
+  if (pendingIds.length === 0) {
+    return filterActiveQueue(queue, hosts);
+  }
+
+  let next = queue.filter((id) => !pendingIds.includes(id));
+  next = filterActiveQueue(next, hosts);
+
+  for (const hostId of pendingIds) {
+    const peers = next.filter((id) => id !== hostId);
+    const inserted = insertAtAveragePriority(next, hostId, peers);
+    next = inserted.queue;
+  }
+
+  return next;
+}
+
+/**
  * 멤버 활성/비활성 전환.
  * - 비활성: 통계(count/totalWorkingDays) 유지, 큐에서 제외
- * - 활성: 큐 맨 뒤로 재진입
+ * - 재활성: 현재 활성 멤버 평균 Priority(큐 순위)로 Soft Reset.
+ *           count / totalWorkingDays 등 누적 통계는 유지한다.
+ *           softResetPending 플래그로 Swap/재조회 Replay 후에도 보정 유지.
  */
 export function setHostActive(hosts, queue, baseQueue, hostId, active) {
   const target = hosts.find((h) => h.id === hostId);
@@ -343,29 +482,55 @@ export function setHostActive(hosts, queue, baseQueue, hostId, active) {
     }
   }
 
-  const nextHosts = hosts.map((h) =>
-    h.id === hostId ? { ...h, active } : h,
-  );
-
   if (!active) {
+    const nextHosts = hosts.map((h) =>
+      h.id === hostId
+        ? { ...h, active: false, softResetPending: false }
+        : h,
+    );
+
     return {
       ok: true,
       hosts: nextHosts,
       queue: queue.filter((id) => id !== hostId),
       baseQueue: baseQueue.filter((id) => id !== hostId),
+      reactivated: false,
     };
   }
 
-  const nextQueue = queue.includes(hostId) ? queue : [...queue, hostId];
-  const nextBase = baseQueue.includes(hostId)
-    ? baseQueue
-    : [...baseQueue, hostId];
+  const wasInactive = target.active === false;
+  if (!wasInactive) {
+    return {
+      ok: true,
+      hosts: hosts.map((h) => (h.id === hostId ? { ...h, active: true } : h)),
+      queue,
+      baseQueue,
+      reactivated: false,
+    };
+  }
+
+  // 재활성화 직전 기준의 다른 Active 멤버 (본인 제외)
+  const activePeerIds = getActiveHosts(hosts)
+    .filter((h) => h.id !== hostId)
+    .map((h) => h.id);
+
+  const nextHosts = hosts.map((h) =>
+    h.id === hostId
+      ? { ...h, active: true, softResetPending: true }
+      : h,
+  );
+
+  const nextQueue = insertAtAveragePriority(queue, hostId, activePeerIds);
+  const nextBase = insertAtAveragePriority(baseQueue, hostId, activePeerIds);
 
   return {
     ok: true,
     hosts: nextHosts,
-    queue: nextQueue,
-    baseQueue: nextBase,
+    queue: nextQueue.queue,
+    baseQueue: nextBase.queue,
+    reactivated: true,
+    /** 0-based queue index (표시용 순위는 +1) */
+    averagePriority: nextQueue.averageIndex,
   };
 }
 
@@ -402,23 +567,16 @@ export function moveHostToQueueTail(queue, hostId) {
 
 /**
  * 단일 요일 자동 배정.
- * Queue 앞에서부터 탐색하여 당일 출근자 중 최우선 호스트를 선택한다.
- * excludeHostId(직전 요일 배정자)는 연속 배정 방지를 위해 1차로 건너뛰고,
- * 다른 출근자가 없을 때만 fallback으로 허용한다.
+ * 큐 Front부터 순회하여 당일 출근(attendance === true)인 첫 멤버를 배정한다.
+ * (연속 배정 가드 없음 — 순수 Round-robin)
  */
-export function assignDay(queue, attendance, day, excludeHostId) {
-  const dayAttendance = attendance[day] ?? {};
+export function assignDay(queue, attendance, day) {
+  const dayAttendance = attendance?.[day] ?? {};
 
   for (const hostId of queue) {
-    if (excludeHostId !== undefined && hostId === excludeHostId) continue;
     if (dayAttendance[hostId] === true) {
       return hostId;
     }
-  }
-
-  // 대안 출근자가 없으면 연속 배정 허용 (1명만 출근한 경우 등)
-  if (excludeHostId !== undefined && dayAttendance[excludeHostId] === true) {
-    return excludeHostId;
   }
 
   return undefined;
@@ -439,7 +597,7 @@ export function recountFromWeeks(hosts, weeks) {
     if (!week.confirmed) continue;
 
     for (const day of getAvailableDays(week)) {
-      const dayAttendance = week.attendance[day] ?? {};
+      const dayAttendance = week.attendance?.[day] ?? {};
 
       nextHosts = nextHosts.map((host) =>
         dayAttendance[host.id] === true
@@ -447,7 +605,7 @@ export function recountFromWeeks(hosts, weeks) {
           : host,
       );
 
-      const assignedId = week.assignments[day];
+      const assignedId = week.assignments?.[day];
       if (assignedId !== undefined) {
         nextHosts = nextHosts.map((host) =>
           host.id === assignedId
@@ -466,6 +624,10 @@ export function recountFromWeeks(hosts, weeks) {
  * count / totalWorkingDays / priorityQueue를 재계산한다.
  * (동결된 과거 주차의 배정 결과 자체는 변경하지 않으며,
  *  재계산된 큐는 미확정 차주 배정에만 사용된다.)
+ *
+ * softResetPending 멤버는 Replay 순환에서 제외한 뒤,
+ * 최종 큐에 평균 위치로 다시 삽입한다.
+ * (휴면 기간 미배정으로 앞으로 밀려 올라가는 문제 방지)
  */
 export function replayQueueAndCounts(hosts, baseQueue, weeks) {
   let nextHosts = hosts.map((h) => ({
@@ -473,13 +635,21 @@ export function replayQueueAndCounts(hosts, baseQueue, weeks) {
     count: 0,
     totalWorkingDays: 0,
   }));
-  let nextQueue = filterActiveQueue(baseQueue, hosts);
+
+  const softResetIds = new Set(
+    hosts.filter((h) => h.softResetPending).map((h) => h.id),
+  );
+
+  // Replay 중에는 soft-reset 대기 멤버를 큐에서 제외 (현재 활성만)
+  let nextQueue = filterActiveQueue(baseQueue, hosts).filter(
+    (id) => !softResetIds.has(id),
+  );
 
   for (const week of weeks) {
     if (!week.confirmed) continue;
 
     for (const day of getAvailableDays(week)) {
-      const dayAttendance = week.attendance[day] ?? {};
+      const dayAttendance = week.attendance?.[day] ?? {};
 
       nextHosts = nextHosts.map((host) =>
         dayAttendance[host.id] === true
@@ -487,7 +657,7 @@ export function replayQueueAndCounts(hosts, baseQueue, weeks) {
           : host,
       );
 
-      const assignedId = week.assignments[day];
+      const assignedId = week.assignments?.[day];
       if (assignedId !== undefined) {
         nextHosts = nextHosts.map((host) =>
           host.id === assignedId
@@ -495,7 +665,7 @@ export function replayQueueAndCounts(hosts, baseQueue, weeks) {
             : host,
         );
 
-        // 활성 멤버만 큐 순환 (비활성은 통계만 유지)
+        // 활성 멤버만 큐 순환 (비활성·soft-reset 대기는 제외)
         if (nextQueue.includes(assignedId)) {
           nextQueue = moveHostToQueueTail(nextQueue, assignedId);
         }
@@ -503,12 +673,15 @@ export function replayQueueAndCounts(hosts, baseQueue, weeks) {
     }
   }
 
+  // Soft-reset 멤버를 최종 큐의 평균 위치에 재삽입
+  nextQueue = applySoftResetToQueue(nextQueue, nextHosts);
+
   return { hosts: nextHosts, queue: nextQueue };
 }
 
 /**
  * 주차 자동 배정 + 확정.
- * 요일 순회 시 직전 요일 배정자와 연속되지 않도록 우선 배정한다.
+ * 요일마다 큐 Front부터 출근자를 배정하고 Tail로 보낸다.
  */
 export function assignWeek(week, hosts, queue) {
   const emptyDays = findEmptyAttendanceDays(week, hosts);
@@ -526,15 +699,9 @@ export function assignWeek(week, hosts, queue) {
   const assignments = {};
   const availableDays = getAvailableDays(week);
   const failedDays = [];
-  let previousHostId;
 
   for (const day of availableDays) {
-    const hostId = assignDay(
-      nextQueue,
-      week.attendance,
-      day,
-      previousHostId,
-    );
+    const hostId = assignDay(nextQueue, week.attendance, day);
 
     if (hostId === undefined) {
       failedDays.push(day);
@@ -542,7 +709,6 @@ export function assignWeek(week, hosts, queue) {
     }
 
     assignments[day] = hostId;
-    previousHostId = hostId;
 
     const dayAttendance = week.attendance[day] ?? {};
 
@@ -557,7 +723,12 @@ export function assignWeek(week, hosts, queue) {
       }
 
       if (host.id === hostId) {
-        updated = { ...updated, count: updated.count + 1 };
+        updated = {
+          ...updated,
+          count: updated.count + 1,
+          // 배정에 참여하면 soft-reset 보정 대기 해제
+          softResetPending: false,
+        };
       }
 
       return updated;
@@ -720,19 +891,10 @@ export function swapAssignments(
 }
 
 /**
- * 확정된 Week의 다음 주 잠금을 해제한다.
+ * 확정 후 연속 잠금 규칙을 다시 적용한다.
  */
-export function unlockNextWeek(weeks, confirmedWeekId) {
-  const index = weeks.findIndex((w) => w.id === confirmedWeekId);
-  if (index < 0 || index >= weeks.length - 1) {
-    return weeks;
-  }
-
-  const nextIndex = index + 1;
-
-  return weeks.map((week, i) =>
-    i === nextIndex ? { ...week, isLocked: false } : week,
-  );
+export function unlockNextWeek(weeks, _confirmedWeekId) {
+  return applySequentialLocks(weeks);
 }
 
 /**
@@ -753,9 +915,9 @@ export function calcWorkRatio(host) {
 }
 
 /**
- * 슬랙 공유용 텍스트를 생성한다.
+ * 슬랙 공유용 텍스트를 생성한다. (날짜 구간 기준, 주차 번호 없음)
  */
-export function formatSlackShare(week, weekNumber, hostMap) {
+export function formatSlackShare(week, hostMap) {
   const parts = getAvailableDays(week).map((day) => {
     const hostId = week.assignments[day];
     const name =
@@ -763,7 +925,8 @@ export function formatSlackShare(week, weekNumber, hostMap) {
     return `${DAY_LABELS[day]}: ${name}`;
   });
 
-  return `📢 [${weekNumber}주차 호스트] ${parts.join(' | ')}`;
+  const period = `${formatDate(week.startDate)}~${formatDate(week.endDate)}`;
+  return `📢 [${period} 호스트] ${parts.join(' | ')}`;
 }
 
 /**
@@ -771,9 +934,9 @@ export function formatSlackShare(week, weekNumber, hostMap) {
  */
 export function formatAllSlackShares(weeks, hostMap) {
   return weeks
-    .map((week, index) => {
+    .map((week) => {
       if (!week.confirmed) return null;
-      return formatSlackShare(week, index + 1, hostMap);
+      return formatSlackShare(week, hostMap);
     })
     .filter(Boolean)
     .join('\n');
@@ -789,11 +952,15 @@ export function serializeBackup(state) {
     hosts: state.hosts,
     priorityQueue: state.priorityQueue,
     basePriorityQueue: state.basePriorityQueue,
-    weeks: state.weeks.map((week) => ({
-      ...week,
-      startDate: formatDate(week.startDate),
-      endDate: formatDate(week.endDate),
-    })),
+    weeks: state.weeks.map((week) => {
+      const mondayKey = getWeekMondayKey(week);
+      return {
+        ...week,
+        id: mondayKey || week.id,
+        startDate: formatDate(week.startDate),
+        endDate: formatDate(week.endDate),
+      };
+    }),
   };
 }
 
@@ -815,6 +982,7 @@ export function parseBackup(data) {
     count: h.count ?? 0,
     totalWorkingDays: h.totalWorkingDays ?? 0,
     active: h.active !== false,
+    softResetPending: Boolean(h.softResetPending),
     notionPageId: h.notionPageId ?? null,
   }));
 
@@ -823,6 +991,7 @@ export function parseBackup(data) {
   }
 
   try {
+    const hostIds = hosts.map((h) => h.id);
     const weeks = (data.weeks ?? []).map((week) => {
       const startDate = parseDate(week.startDate);
       const endDate = parseDate(week.endDate);
@@ -830,15 +999,22 @@ export function parseBackup(data) {
         throw new Error('INVALID_WEEK_DATE');
       }
 
+      const mondayKey = formatDate(getMondayOfWeek(startDate));
+      const attendance =
+        week.attendance && typeof week.attendance === 'object'
+          ? week.attendance
+          : createDefaultAttendance(hostIds);
+
       return {
         ...week,
+        id: mondayKey || week.id,
         startDate,
         endDate,
         isLocked: week.isLocked ?? !week.unlocked,
         confirmed: Boolean(week.confirmed),
         assignments: week.assignments ?? {},
         passes: week.passes ?? {},
-        attendance: week.attendance,
+        attendance,
       };
     });
 
@@ -848,7 +1024,7 @@ export function parseBackup(data) {
         hosts,
         priorityQueue: data.priorityQueue,
         basePriorityQueue: data.basePriorityQueue ?? [...data.priorityQueue],
-        weeks,
+        weeks: applySequentialLocks(weeks),
       },
     };
   } catch {

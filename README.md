@@ -20,6 +20,7 @@ npm install
 npm run dev            # 웹(5173) + API(3001)
 ```
 
+스케줄/큐 로직은 [docs/SCHEDULER_LOGIC.md](./docs/SCHEDULER_LOGIC.md),  
 Notion 연동은 [docs/NOTION.md](./docs/NOTION.md) 참고.
 
 ## Vercel 배포 (프론트 + API 한곳)
@@ -51,8 +52,8 @@ Notion 연동은 [docs/NOTION.md](./docs/NOTION.md) 참고.
 
 ## Notion DB 권장 구조
 
-- **Members**: Name, Active, AppHostId
-- **Schedule History**: WeekKey, Period, Mon~Thu, SlackText, Status
+- **Members**: Name, Active, AppHostId, Priority, BasePriority
+- **Schedule History**: WeekKey, Period, Mon~Thu, Attendance, SlackText, Status
 
 자세한 스키마와 셋업은 `docs/NOTION.md`에 있습니다.
 

@@ -26,7 +26,7 @@ export function HostManagementPanel({
         <header className={styles.header}>
           <h2 className={styles.title}>호스트 관리</h2>
           <p className={styles.subtitle}>
-            추가·삭제·비활성화 (통계 유지 / 큐 제외)
+            추가·삭제·비활성화 (통계 유지 / 재활성 시 평균 Priority 보정)
           </p>
         </header>
 
@@ -73,7 +73,11 @@ export function HostManagementPanel({
                     type="button"
                     className={styles.activeButton}
                     onClick={() => onToggleActive(host.id, !isActive)}
-                    title={isActive ? '비활성화' : '활성화'}
+                    title={
+                      isActive
+                        ? '비활성화 (통계 유지, Priority Queue에서 제외)'
+                        : '활성화 (활성 멤버 평균 Priority로 보정, 통계 유지)'
+                    }
                   >
                     {isActive ? '비활성' : '활성'}
                   </button>

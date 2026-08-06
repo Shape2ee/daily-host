@@ -11,15 +11,17 @@ import {
   filterActiveQueue,
   generateWeeks,
   getActiveHosts,
+  getWeekMondayKey,
   hasConfirmedAssignment,
+  insertAtAveragePriority,
   isWeekFrozen,
+  mergeConfirmedIntoWeeks,
   parseBackup,
   removeHost as removeHostUtil,
   serializeBackup,
   setHostActive as setHostActiveUtil,
   swapAssignments as swapAssignmentsUtil,
   replayQueueAndCounts,
-  recountFromWeeks,
   unlockNextWeek,
   updateAttendance as updateAttendanceUtil,
 } from '../utils/scheduler.js';
@@ -27,6 +29,23 @@ import {
   notionMembersToHosts,
   notionSchedulesToWeeks,
 } from '../utils/notionSync.js';
+
+/**
+ * 확정 주차를 캘린더 월요일 키 기준으로 중복 제거 후 시간순 정렬한다.
+ */
+function uniqueConfirmedWeeksSorted(weeks) {
+  const seen = new Set();
+  const unique = [];
+  for (const week of weeks ?? []) {
+    if (!week?.confirmed) continue;
+    const key = getWeekMondayKey(week);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    unique.push(week);
+  }
+  unique.sort((a, b) => a.startDate.getTime() - b.startDate.getTime());
+  return unique;
+}
 
 function loadState() {
   try {
@@ -79,23 +98,45 @@ export function useScheduler() {
     [state.hosts],
   );
 
-  const searchSchedule = useCallback((startDate, endDate) => {
+  /**
+   * 일정 조회: 주차 골격을 만든 뒤, 같은 기간의 확정 기록이 있으면 병합한다.
+   * @param {string} startDate
+   * @param {string} endDate
+   * @param {{ extraConfirmedWeeks?: object[], replayWeeks?: object[] }} [options]
+   *   - extraConfirmedWeeks: Notion 등 외부 확정 주차
+   *   - replayWeeks: 횟수/큐 재계산에 쓸 전체 확정 주차(미지정 시 화면 weeks)
+   */
+  const searchSchedule = useCallback((startDate, endDate, options = {}) => {
+    const extraConfirmedWeeks = options.extraConfirmedWeeks ?? [];
+    const replayWeeksOption = options.replayWeeks;
+
     patchState((prev) => {
       const hostIds = getActiveHosts(prev.hosts).map((h) => h.id);
-      const weeks = generateWeeks(startDate, endDate, hostIds);
-      const activeQueue = filterActiveQueue(
-        prev.basePriorityQueue,
+      const generated = generateWeeks(startDate, endDate, hostIds);
+      const weeks = mergeConfirmedIntoWeeks(generated, [
+        prev.weeks,
+        extraConfirmedWeeks,
+      ]);
+
+      const replaySource =
+        replayWeeksOption !== undefined
+          ? replayWeeksOption
+          : [
+              ...prev.weeks.filter((w) => w.confirmed),
+              ...extraConfirmedWeeks.filter((w) => w.confirmed),
+              ...weeks.filter((w) => w.confirmed),
+            ];
+
+      const replayed = replayQueueAndCounts(
         prev.hosts,
+        prev.basePriorityQueue,
+        uniqueConfirmedWeeksSorted(replaySource),
       );
 
       return {
         ...prev,
-        hosts: prev.hosts.map((h) => ({
-          ...h,
-          count: 0,
-          totalWorkingDays: 0,
-        })),
-        priorityQueue: activeQueue,
+        hosts: replayed.hosts,
+        priorityQueue: replayed.queue,
         weeks,
       };
     });
@@ -103,21 +144,87 @@ export function useScheduler() {
 
   /**
    * Notion 멤버(+스케줄)로 앱 상태를 hydrate한다.
-   * - 큐 순서: Notion Priority / BasePriority 그대로 사용 (다른 세션과 동일)
-   * - 횟수: 전체 확정 스케줄로 recount
+   * - Active / BasePriority: Notion Members
+   * - priorityQueue: BasePriority 위에서 확정 Schedule을 시간순 Replay한 결과
+   *   (Notion Priority 필드를 그대로 쓰지 않음 — stale Priority 방지)
+   * - Notion에서 InActive→Active 로 바뀐 멤버는 Soft Reset 적용
    * - 화면 weeks: displaySchedules (당월) 기준
    */
   const hydrateFromNotion = useCallback((members, displaySchedules, allSchedules) => {
     patchState((prev) => {
       let hosts = prev.hosts;
-      let priorityQueue = prev.priorityQueue;
       let basePriorityQueue = prev.basePriorityQueue;
 
       if (Array.isArray(members) && members.length > 0) {
         const mapped = notionMembersToHosts(members, prev.hosts);
         hosts = mapped.hosts;
-        priorityQueue = mapped.priorityQueue;
         basePriorityQueue = mapped.basePriorityQueue;
+
+        // Notion에 아직 없는 로컬 전용 멤버는 유지 (동기화 실패 후 새로고침 대비)
+        const mappedIds = new Set(mapped.hosts.map((h) => h.id));
+        const mappedNames = new Set(
+          mapped.hosts.map((h) => String(h.name).trim().toLowerCase()),
+        );
+        const localOnly = prev.hosts.filter((h) => {
+          const nameKey = String(h.name ?? '').trim().toLowerCase();
+          return !mappedIds.has(h.id) && !mappedNames.has(nameKey);
+        });
+
+        if (localOnly.length > 0) {
+          hosts = [...hosts, ...localOnly];
+          for (const host of localOnly) {
+            if (
+              host.active !== false &&
+              !basePriorityQueue.includes(host.id)
+            ) {
+              basePriorityQueue = [...basePriorityQueue, host.id];
+            }
+          }
+        }
+
+        // Notion Active 상태 기준으로 재활성 Soft Reset
+        const prevById = new Map(prev.hosts.map((h) => [h.id, h]));
+        const reactivatedIds = [];
+
+        hosts = hosts.map((h) => {
+          const prevHost = prevById.get(h.id);
+          const wasInactive = prevHost?.active === false;
+          const nowActive = h.active !== false;
+
+          // 로컬 전용 멤버는 Notion Active 토글 대상이 아니므로 플래그 유지
+          if (localOnly.some((x) => x.id === h.id)) {
+            return {
+              ...h,
+              softResetPending: Boolean(prevHost?.softResetPending),
+            };
+          }
+
+          if (wasInactive && nowActive) {
+            reactivatedIds.push(h.id);
+            return { ...h, softResetPending: true };
+          }
+
+          if (nowActive && prevHost?.softResetPending) {
+            return { ...h, softResetPending: true };
+          }
+
+          return { ...h, softResetPending: false };
+        });
+
+        if (reactivatedIds.length > 0) {
+          basePriorityQueue = basePriorityQueue.filter(
+            (id) => !reactivatedIds.includes(id),
+          );
+
+          for (const hostId of reactivatedIds) {
+            const b = insertAtAveragePriority(
+              basePriorityQueue,
+              hostId,
+              basePriorityQueue,
+            );
+            basePriorityQueue = b.queue;
+          }
+        }
       }
 
       const replaySource =
@@ -128,43 +235,62 @@ export function useScheduler() {
             : null;
 
       const replaceWeeks = displaySchedules !== undefined;
-      const allWeeks =
+      const scheduleWeeks =
         replaySource != null
           ? notionSchedulesToWeeks(replaySource ?? [], hosts)
-          : prev.weeks;
+          : null;
       const weeks = replaceWeeks
         ? notionSchedulesToWeeks(displaySchedules ?? [], hosts)
         : prev.weeks;
 
-      const recounted = recountFromWeeks(hosts, allWeeks);
+      const replayWeeks = uniqueConfirmedWeeksSorted(
+        scheduleWeeks ?? prev.weeks,
+      );
+
+      const replayed = replayQueueAndCounts(
+        hosts,
+        basePriorityQueue,
+        replayWeeks,
+      );
 
       return {
-        hosts: recounted,
-        priorityQueue: filterActiveQueue(priorityQueue, recounted),
-        basePriorityQueue,
+        hosts: replayed.hosts.map((h) => {
+          const withFlag = hosts.find((x) => x.id === h.id);
+          return {
+            ...h,
+            softResetPending: Boolean(withFlag?.softResetPending),
+          };
+        }),
+        priorityQueue: filterActiveQueue(replayed.queue, replayed.hosts),
+        basePriorityQueue: filterActiveQueue(basePriorityQueue, replayed.hosts),
         weeks,
       };
     });
   }, [patchState]);
 
   const addHost = useCallback((name) => {
-    const next = patchState((prev) => {
-      const result = addHostUtil(
-        prev.hosts,
-        prev.priorityQueue,
-        prev.basePriorityQueue,
-        prev.weeks,
-        name,
-      );
-      return {
-        hosts: result.hosts,
-        priorityQueue: result.queue,
-        basePriorityQueue: result.baseQueue,
-        weeks: result.weeks,
-      };
-    });
-    return { ok: true, snapshot: next };
-  }, [patchState]);
+    const prev = stateRef.current;
+    const result = addHostUtil(
+      prev.hosts,
+      prev.priorityQueue,
+      prev.basePriorityQueue,
+      prev.weeks,
+      name,
+    );
+
+    if (!result.ok) {
+      return { error: result.error };
+    }
+
+    const snapshot = {
+      hosts: result.hosts,
+      priorityQueue: result.queue,
+      basePriorityQueue: result.baseQueue,
+      weeks: result.weeks,
+    };
+    commitState(snapshot);
+    return { ok: true, snapshot };
+  }, [commitState]);
 
   const canRemoveHost = useCallback(
     (hostId) => {
@@ -239,7 +365,12 @@ export function useScheduler() {
     };
     commitState(snapshot);
 
-    return { error: null, snapshot };
+    return {
+      error: null,
+      snapshot,
+      reactivated: Boolean(result.reactivated),
+      averagePriority: result.averagePriority,
+    };
   }, [commitState]);
 
   const updateAttendance = useCallback((weekId, hostId, day, present) => {

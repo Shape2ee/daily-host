@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { DAY_LABELS } from "../../constants/hosts";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { DAY_LABELS, NOTION_PENDING_KEY } from "../../constants/hosts";
 import { useScheduler } from "../../hooks/useScheduler";
 import {
   clearNotionSchedules,
@@ -16,8 +16,10 @@ import {
 import {
   buildMembersPayload,
   buildSchedulePayload,
+  filterSchedulesByDateRange,
   filterSchedulesByMonth,
   getMonthRange,
+  notionSchedulesToWeeks,
 } from "../../utils/notionSync";
 import { ConfirmModal } from "../ConfirmModal/ConfirmModal";
 import { DateSearchForm } from "../DateSearchForm/DateSearchForm";
@@ -25,6 +27,14 @@ import { HostManagementPanel } from "../HostManagementPanel/HostManagementPanel"
 import { NotionSyncPanel } from "../NotionSyncPanel/NotionSyncPanel";
 import { ScheduleContainer } from "../ScheduleContainer/ScheduleContainer";
 import styles from "./Dashboard.module.scss";
+
+function readNotionPending() {
+  try {
+    return localStorage.getItem(NOTION_PENDING_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
 
 const REMOVE_ERROR_MESSAGES = {
   MIN_HOSTS: "최소 활성 2명 이상 유지해야 하므로 삭제할 수 없습니다.",
@@ -53,6 +63,9 @@ const IMPORT_ERROR_MESSAGES = {
   INVALID_HOSTS: "호스트 데이터가 올바르지 않습니다.",
 };
 
+/**
+ * @returns {{ ok: true, skipped?: boolean, created?: number, updated?: number } | { ok: false, error: string }}
+ */
 async function syncWeeksToNotion(
   weeks,
   hosts,
@@ -67,20 +80,22 @@ async function syncWeeksToNotion(
     payload = payload.filter((item) => idSet.has(item.weekKey));
   }
   if (payload.length === 0) {
-    showToast('업로드할 확정 주차가 없습니다.');
-    return null;
+    return { ok: true, skipped: true, created: 0, updated: 0 };
   }
 
   try {
     const data = await upsertNotionSchedules(payload);
     showToast(`${label} · 생성 ${data.created} / 갱신 ${data.updated}`);
-    return data;
+    return { ok: true, ...data };
   } catch (error) {
     showToast(`Notion 동기화 실패: ${error.message}`);
-    return null;
+    return { ok: false, error: error.message };
   }
 }
 
+/**
+ * @returns {{ ok: true, count?: number } | { ok: false, error: string }}
+ */
 async function syncMembersPriorityToNotion(
   hosts,
   priorityQueue,
@@ -95,14 +110,12 @@ async function syncMembersPriorityToNotion(
     );
     const data = await pushNotionMembers(payload);
     if (!silent) {
-      showToast?.(`멤버 우선순위 동기화 · ${data.count}명`);
+      showToast?.(`멤버·Active·우선순위 Notion 반영 · ${data.count}명`);
     }
-    return data;
+    return { ok: true, count: data.count };
   } catch (error) {
-    if (!silent) {
-      showToast?.(`멤버 우선순위 동기화 실패: ${error.message}`);
-    }
-    return null;
+    showToast?.(`멤버 Notion 동기화 실패: ${error.message}`);
+    return { ok: false, error: error.message };
   }
 }
 
@@ -136,6 +149,7 @@ export function Dashboard() {
   const [notionBusy, setNotionBusy] = useState(false);
   const [historyTick, setHistoryTick] = useState(0);
   const [monthBootstrapping, setMonthBootstrapping] = useState(true);
+  const [notionSyncPending, setNotionSyncPending] = useState(readNotionPending);
   const fileInputRef = useRef(null);
   const toastTimerRef = useRef(null);
 
@@ -146,6 +160,43 @@ export function Dashboard() {
     }
     toastTimerRef.current = window.setTimeout(() => setToast(null), 3200);
   };
+
+  const markNotionPending = useCallback(() => {
+    setNotionSyncPending(true);
+    try {
+      localStorage.setItem(NOTION_PENDING_KEY, "1");
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const clearNotionPending = useCallback(() => {
+    setNotionSyncPending(false);
+    try {
+      localStorage.removeItem(NOTION_PENDING_KEY);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // 실패 시 pending 표시만. 성공 clear는 호출측에서 (weeks+members 모두 성공 시)
+  const trackMemberSync = useCallback(
+    async (...args) => {
+      const result = await syncMembersPriorityToNotion(...args);
+      if (!result.ok) markNotionPending();
+      return result;
+    },
+    [markNotionPending],
+  );
+
+  const trackWeekSync = useCallback(
+    async (...args) => {
+      const result = await syncWeeksToNotion(...args);
+      if (!result.ok) markNotionPending();
+      return result;
+    },
+    [markNotionPending],
+  );
 
   // 첫 진입: Notion 멤버 + 당월 확정 스케줄 hydrate
   useEffect(() => {
@@ -195,12 +246,77 @@ export function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 마운트 시 1회
   }, []);
 
+  const handleSearch = async (startDate, endDate) => {
+    // 로컬 확정 주차는 searchSchedule 내부에서 먼저 병합
+    searchSchedule(startDate, endDate);
+
+    try {
+      const result = await fetchNotionSchedules();
+      const schedules = result.schedules ?? [];
+      const inRange = filterSchedulesByDateRange(
+        schedules,
+        startDate,
+        endDate,
+      );
+      if (inRange.length === 0) return;
+
+      const extraConfirmedWeeks = notionSchedulesToWeeks(inRange, hosts);
+      const allConfirmedWeeks = notionSchedulesToWeeks(schedules, hosts);
+      searchSchedule(startDate, endDate, {
+        extraConfirmedWeeks,
+        replayWeeks: allConfirmedWeeks,
+      });
+    } catch {
+      // Notion 실패 시 로컬 병합 결과 유지
+    }
+  };
+
   const handlePushSchedules = async (label) => {
     setNotionBusy(true);
     try {
-      const data = await syncWeeksToNotion(weeks, hosts, showToast, label);
-      if (data) setHistoryTick((n) => n + 1);
-      return data;
+      const weeksResult = await trackWeekSync(weeks, hosts, showToast, label);
+      const membersResult = await trackMemberSync(
+        hosts,
+        priorityQueue,
+        basePriorityQueue,
+        { silent: true, showToast },
+      );
+      if (weeksResult.ok && membersResult.ok) {
+        clearNotionPending();
+        if (!weeksResult.skipped) setHistoryTick((n) => n + 1);
+      } else {
+        markNotionPending();
+      }
+      return weeksResult;
+    } finally {
+      setNotionBusy(false);
+    }
+  };
+
+  const handleResyncNotion = async () => {
+    setNotionBusy(true);
+    showToast("Notion 재동기화 중…");
+    try {
+      const membersResult = await syncMembersPriorityToNotion(
+        hosts,
+        priorityQueue,
+        basePriorityQueue,
+        { silent: true, showToast },
+      );
+      const weeksResult = await syncWeeksToNotion(
+        weeks,
+        hosts,
+        showToast,
+        "미동기화 재동기화",
+      );
+      if (membersResult.ok && weeksResult.ok) {
+        clearNotionPending();
+        if (!weeksResult.skipped) setHistoryTick((n) => n + 1);
+        showToast("Notion 재동기화 완료.");
+      } else {
+        markNotionPending();
+        showToast("Notion 재동기화 실패. 잠시 후 다시 시도하세요.");
+      }
     } finally {
       setNotionBusy(false);
     }
@@ -212,15 +328,24 @@ export function Dashboard() {
       return;
     }
     const result = addHost(name);
+    if (result?.error === 'DUPLICATE_NAME') {
+      showToast("같은 이름의 호스트가 이미 있습니다.");
+      return;
+    }
+    if (result?.error || !result?.ok) {
+      showToast("호스트 추가에 실패했습니다.");
+      return;
+    }
     setNewHostName("");
     showToast(`"${name.trim()}" 호스트가 추가되었습니다.`);
     if (result?.snapshot) {
-      await syncMembersPriorityToNotion(
+      const synced = await trackMemberSync(
         result.snapshot.hosts,
         result.snapshot.priorityQueue,
         result.snapshot.basePriorityQueue,
         { silent: true, showToast },
       );
+      if (synced.ok) clearNotionPending();
     }
   };
 
@@ -232,12 +357,13 @@ export function Dashboard() {
     }
     showToast("호스트가 삭제되었습니다.");
     if (result?.snapshot) {
-      await syncMembersPriorityToNotion(
+      const synced = await trackMemberSync(
         result.snapshot.hosts,
         result.snapshot.priorityQueue,
         result.snapshot.basePriorityQueue,
         { silent: true, showToast },
       );
+      if (synced.ok) clearNotionPending();
     }
   };
 
@@ -247,16 +373,30 @@ export function Dashboard() {
       showToast(ACTIVE_ERROR_MESSAGES[result.error] ?? "상태 변경에 실패했습니다.");
       return;
     }
-    showToast(
-      active ? "호스트가 활성화되었습니다." : "호스트가 비활성화되었습니다.",
-    );
+
+    let localMessage;
+    if (!active) {
+      localMessage = "호스트가 비활성화되었습니다.";
+    } else if (result?.reactivated && result.averagePriority != null) {
+      const avgRank = result.averagePriority + 1;
+      localMessage = `재활성화된 멤버의 우선순위가 현재 활성 멤버들의 평균 점수(${avgRank})로 보정되었습니다.`;
+    } else {
+      localMessage = "호스트가 활성화되었습니다.";
+    }
+
+    showToast(`${localMessage} Notion 반영 중…`);
+
     if (result?.snapshot) {
-      await syncMembersPriorityToNotion(
+      const synced = await trackMemberSync(
         result.snapshot.hosts,
         result.snapshot.priorityQueue,
         result.snapshot.basePriorityQueue,
         { silent: true, showToast },
       );
+      if (synced.ok) {
+        clearNotionPending();
+        showToast(`${localMessage} Notion Active 반영 완료.`);
+      }
     }
   };
 
@@ -277,20 +417,25 @@ export function Dashboard() {
     showToast('주차가 확정되었습니다. Notion 동기화 중…');
     setNotionBusy(true);
     try {
-      const data = await syncWeeksToNotion(
+      const weeksResult = await trackWeekSync(
         result.snapshot.weeks,
         result.snapshot.hosts,
         showToast,
         '주차 확정 · Notion 동기화',
         weekId,
       );
-      await syncMembersPriorityToNotion(
+      const membersResult = await trackMemberSync(
         result.snapshot.hosts,
         result.snapshot.priorityQueue,
         result.snapshot.basePriorityQueue,
         { silent: true, showToast },
       );
-      if (data) setHistoryTick((n) => n + 1);
+      if (weeksResult.ok && membersResult.ok) {
+        clearNotionPending();
+        if (!weeksResult.skipped) setHistoryTick((n) => n + 1);
+      } else {
+        markNotionPending();
+      }
     } finally {
       setNotionBusy(false);
     }
@@ -305,20 +450,25 @@ export function Dashboard() {
     showToast('교체/맞교환 반영. Notion 동기화 중…');
     setNotionBusy(true);
     try {
-      const data = await syncWeeksToNotion(
+      const weeksResult = await trackWeekSync(
         result.snapshot.weeks,
         result.snapshot.hosts,
         showToast,
         '맞교환 · Notion 동기화',
         result.affectedWeekIds ?? [weekId],
       );
-      await syncMembersPriorityToNotion(
+      const membersResult = await trackMemberSync(
         result.snapshot.hosts,
         result.snapshot.priorityQueue,
         result.snapshot.basePriorityQueue,
         { silent: true, showToast },
       );
-      if (data) setHistoryTick((n) => n + 1);
+      if (weeksResult.ok && membersResult.ok) {
+        clearNotionPending();
+        if (!weeksResult.skipped) setHistoryTick((n) => n + 1);
+      } else {
+        markNotionPending();
+      }
     } finally {
       setNotionBusy(false);
     }
@@ -364,19 +514,30 @@ export function Dashboard() {
     setNotionBusy(true);
     try {
       const data = await clearNotionSchedules({ start, end });
+      let membersOk = true;
       if (result?.snapshot) {
-        await syncMembersPriorityToNotion(
+        const membersResult = await trackMemberSync(
           result.snapshot.hosts,
           result.snapshot.priorityQueue,
           result.snapshot.basePriorityQueue,
           { silent: true, showToast },
         );
+        membersOk = membersResult.ok;
       }
-      showToast(
-        `일정/횟수 초기화 · Notion ${month}월 ${data.archived ?? 0}건 삭제`,
-      );
+      if (membersOk) {
+        clearNotionPending();
+        showToast(
+          `일정/횟수 초기화 · Notion ${month}월 ${data.archived ?? 0}건 삭제`,
+        );
+      } else {
+        markNotionPending();
+        showToast(
+          `로컬은 초기화되었습니다. Notion 멤버 동기화는 실패했습니다.`,
+        );
+      }
       setHistoryTick((n) => n + 1);
     } catch (error) {
+      markNotionPending();
       showToast(
         `로컬은 초기화되었습니다. Notion 동기화 실패: ${error.message}`,
       );
@@ -395,15 +556,20 @@ export function Dashboard() {
         <div className={styles.headerActions}>
           <div className={styles.meta}>
             <span>호스트 {hosts.length}명</span>
-            <span>주차 {weeks.length}개</span>
+            {notionSyncPending && (
+              <span className={styles.pendingBadge}>미동기화 변경사항 존재</span>
+            )}
           </div>
-          <button
-            type="button"
-            className={styles.slackButton}
-            onClick={handleCopySlack}
-          >
-            📋 슬랙 공유용 복사
-          </button>
+          {notionSyncPending && (
+            <button
+              type="button"
+              className={styles.resyncButton}
+              disabled={notionBusy}
+              onClick={handleResyncNotion}
+            >
+              Notion 재동기화
+            </button>
+          )}
           <button
             type="button"
             className={styles.backupButton}
@@ -452,7 +618,7 @@ export function Dashboard() {
         </div>
 
         <main className={styles.main}>
-          <DateSearchForm onSearch={searchSchedule} />
+          <DateSearchForm onSearch={handleSearch} />
           <NotionSyncPanel
             hosts={hosts}
             priorityQueue={priorityQueue}
@@ -460,7 +626,9 @@ export function Dashboard() {
             busy={notionBusy}
             historyTick={historyTick}
             onPushSchedules={() => handlePushSchedules("확정 주차 동기화")}
-            onLoadMembers={(members) => hydrateFromNotion(members)}
+            onLoadMembers={(members, schedules) =>
+              hydrateFromNotion(members, undefined, schedules)
+            }
             onToast={showToast}
           />
           <ScheduleContainer

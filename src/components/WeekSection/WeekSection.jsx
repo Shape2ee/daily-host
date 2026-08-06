@@ -19,7 +19,6 @@ import styles from './WeekSection.module.scss';
 export function WeekSection({
   week,
   weeks,
-  weekNumber,
   hosts,
   hostMap,
   onUpdateAttendance,
@@ -34,7 +33,10 @@ export function WeekSection({
   const canSwap = week.confirmed && swappableDays.length > 0;
 
   const weekHosts = hosts.filter((host) =>
-    Object.prototype.hasOwnProperty.call(week.attendance.monday, host.id),
+    Object.prototype.hasOwnProperty.call(
+      week.attendance?.monday ?? {},
+      host.id,
+    ),
   );
 
   const cardClassName = [
@@ -46,7 +48,7 @@ export function WeekSection({
     .join(' ');
 
   const handleCopyWeek = async () => {
-    const text = formatSlackShare(week, weekNumber, hostMap);
+    const text = formatSlackShare(week, hostMap);
     try {
       await navigator.clipboard.writeText(text);
       onCopySlack?.('슬랙 공유용 텍스트가 복사되었습니다.');
@@ -60,7 +62,6 @@ export function WeekSection({
       <header className={styles.header}>
         <div>
           <div className={styles.badges}>
-            <span className={styles.weekBadge}>Week {weekNumber}</span>
             {week.confirmed && (
               <span className={styles.confirmedBadge}>확정</span>
             )}
@@ -118,7 +119,6 @@ export function WeekSection({
         <SwapModal
           week={week}
           weeks={weeks}
-          weekNumber={weekNumber}
           hosts={hosts}
           hostMap={hostMap}
           onClose={() => setIsSwapOpen(false)}

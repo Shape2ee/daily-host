@@ -55,6 +55,32 @@
   }
 }
 
+.pendingBadge {
+  color: #9a3412 !important;
+  background: #ffedd5 !important;
+  border-color: #fdba74 !important;
+}
+
+.resyncButton {
+  padding: 8px 14px;
+  border: 1px solid #f97316;
+  border-radius: var(--radius-sm);
+  background: #fff7ed;
+  color: #c2410c;
+  font-size: 0.85rem;
+  font-weight: 700;
+  transition: background var(--transition), transform var(--transition);
+
+  &:hover:not(:disabled) {
+    background: #ffedd5;
+  }
+
+  &:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+}
+
 .slackButton,
 .notionButton,
 .backupButton,
