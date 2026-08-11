@@ -8,6 +8,8 @@ import {
   archiveSchedules,
   createNotionClient,
   getConfig,
+  getHostForDate,
+  getSeoulToday,
   listMembers,
   listSchedules,
   upsertMember,
@@ -36,6 +38,22 @@ export function createApp() {
         scheduleDb: Boolean(config.scheduleDbId),
       },
     });
+  });
+
+  /** 크롬 확장: 오늘(Asia/Seoul) 호스트 */
+  app.get('/api/get-host', async (_req, res) => {
+    try {
+      const config = assertConfigured('schedule');
+      const notion = createNotionClient(config.token);
+      const { date } = getSeoulToday();
+      const result = await getHostForDate(notion, config.scheduleDbId, date);
+      res.json({ ok: true, ...result });
+    } catch (error) {
+      res.status(error.status || 500).json({
+        ok: false,
+        error: error.message || '오늘 호스트 조회 실패',
+      });
+    }
   });
 
   app.post('/api/notion/members/push', async (req, res) => {

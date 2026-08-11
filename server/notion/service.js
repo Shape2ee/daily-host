@@ -157,6 +157,70 @@ export async function listSchedules(notion, scheduleDbId) {
     .sort((a, b) => String(b.startDate ?? '').localeCompare(String(a.startDate ?? '')));
 }
 
+const WEEKDAY_KEYS = [
+  'sunday',
+  'monday',
+  'tuesday',
+  'wednesday',
+  'thursday',
+  'friday',
+  'saturday',
+];
+
+/** Asia/Seoul 기준 오늘 날짜(YYYY-MM-DD)와 요일 키 */
+export function getSeoulToday() {
+  const now = new Date();
+  const date = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now);
+  const weekdayLong = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Seoul',
+    weekday: 'long',
+  })
+    .format(now)
+    .toLowerCase();
+  return { date, day: weekdayLong };
+}
+
+/**
+ * 지정 날짜가 Period에 포함된 확정 주차에서 해당 요일 호스트를 반환한다.
+ * 월~목만 배정. 해당 주차/호스트 없으면 hostName: null.
+ */
+export async function getHostForDate(notion, scheduleDbId, dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const seoulNoon = new Date(Date.UTC(y, m - 1, d, 3, 0, 0)); // UTC 03:00 = KST 12:00
+  const day = WEEKDAY_KEYS[seoulNoon.getUTCDay()];
+
+  const base = { date: dateStr, day, hostName: null, startDate: null, endDate: null };
+
+  if (!['monday', 'tuesday', 'wednesday', 'thursday'].includes(day)) {
+    return base;
+  }
+
+  const pages = await queryAll(notion, scheduleDbId, {
+    and: [
+      { property: 'Period', date: { on_or_before: dateStr } },
+      { property: 'Period', date: { on_or_after: dateStr } },
+    ],
+  });
+
+  if (!pages[0]) return base;
+
+  const schedule = mapSchedulePage(pages[0]);
+  const hostName = schedule[day] || null;
+
+  return {
+    date: dateStr,
+    day,
+    hostName,
+    startDate: schedule.startDate,
+    endDate: schedule.endDate,
+  };
+}
+
 /**
  * Period가 [rangeStart, rangeEnd]와 겹치는 스케줄 페이지를 아카이브한다.
  * 범위가 없으면 Schedule History 전체 아카이브.
