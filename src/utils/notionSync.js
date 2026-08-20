@@ -12,7 +12,7 @@ import {
  * 주차 attendance → Notion Attendance(JSON) 문자열.
  * 예: {"monday":["홍길동","김철수"],"tuesday":[...],...}
  */
-function serializeAttendance(weekAttendance, hostMap) {
+export function serializeAttendance(weekAttendance, hostMap) {
   if (!weekAttendance || typeof weekAttendance !== 'object') return '';
 
   const payload = {};
@@ -30,7 +30,7 @@ function serializeAttendance(weekAttendance, hostMap) {
  * Notion Attendance(JSON) → 앱 attendance.
  * 비어 있거나 파싱 실패면 null (레거시: 전원 출근 유지).
  */
-function deserializeAttendance(text, hosts) {
+export function deserializeAttendance(text, hosts) {
   const trimmed = String(text ?? '').trim();
   if (!trimmed) return null;
 
@@ -61,12 +61,17 @@ function deserializeAttendance(text, hosts) {
 }
 
 /**
- * 확정 주차를 Notion upsert 페이로드로 변환한다.
+ * 주차를 Notion upsert 페이로드로 변환한다.
+ * 기본값은 기존 동작과 동일하게 확정 주차만 포함한다.
  */
-export function buildSchedulePayload(weeks, hostMap) {
+export function buildSchedulePayload(
+  weeks,
+  hostMap,
+  { includeDrafts = false } = {},
+) {
   return weeks
     .map((week, index) => {
-      if (!week.confirmed) return null;
+      if (!week.confirmed && !includeDrafts) return null;
 
       const dayNames = {};
       for (const day of DAY_KEYS) {
@@ -79,7 +84,7 @@ export function buildSchedulePayload(weeks, hostMap) {
 
       const available = getAvailableDays(week);
       const hasAny = available.some((d) => week.assignments[d] !== undefined);
-      if (!hasAny) return null;
+      if (week.confirmed && !hasAny) return null;
 
       const period = `${formatDate(week.startDate)}~${formatDate(week.endDate)}`;
       const mondayKey = formatDate(getMondayOfWeek(week.startDate));
@@ -95,7 +100,8 @@ export function buildSchedulePayload(weeks, hostMap) {
         wednesday: dayNames.wednesday,
         thursday: dayNames.thursday,
         attendance: serializeAttendance(week.attendance, hostMap),
-        slackText: formatSlackShare(week, hostMap),
+        slackText: week.confirmed ? formatSlackShare(week, hostMap) : '',
+        confirmed: Boolean(week.confirmed),
       };
     })
     .filter(Boolean);
@@ -263,7 +269,7 @@ export function buildMembersPayload(hosts, priorityQueue, basePriorityQueue) {
 }
 
 /**
- * Notion Schedule History → 앱 Week[] (확정 상태) 변환.
+ * Notion Schedule History → 앱 Week[] 변환.
  * 호스트 이름은 현재 hosts 목록과 매칭한다.
  * Attendance(JSON)가 있으면 복원하고, 없으면(레거시) 전원 출근으로 둔다.
  */
@@ -298,7 +304,8 @@ export function notionSchedulesToWeeks(schedules, hosts) {
         attendance: restored ?? createDefaultAttendance(hostIds),
         assignments,
         passes: {},
-        confirmed: true,
+        // 레거시 Updated/빈 Status는 이미 확정 이력으로 취급한다.
+        confirmed: item.status !== 'Draft',
         isLocked: false,
         weekNumber: item.weekNumber ?? null,
         _keyIsStable: keyIsStable,

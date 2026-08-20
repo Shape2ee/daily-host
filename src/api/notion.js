@@ -50,6 +50,13 @@ export function upsertNotionSchedules(weeks) {
   });
 }
 
+export function patchNotionAttendance({ week, day, hostName, present }) {
+  return request('/api/notion/schedules/attendance', {
+    method: 'POST',
+    body: JSON.stringify({ week, day, hostName, present }),
+  });
+}
+
 export function clearNotionSchedules({ start, end } = {}) {
   return request('/api/notion/schedules/clear', {
     method: 'POST',

@@ -6,6 +6,7 @@ import {
 } from '../constants/hosts.js';
 import {
   addHost as addHostUtil,
+  applySequentialLocks,
   assignWeek as assignWeekUtil,
   createHostMap,
   filterActiveQueue,
@@ -102,20 +103,22 @@ export function useScheduler() {
    * 일정 조회: 주차 골격을 만든 뒤, 같은 기간의 확정 기록이 있으면 병합한다.
    * @param {string} startDate
    * @param {string} endDate
-   * @param {{ extraConfirmedWeeks?: object[], replayWeeks?: object[] }} [options]
-   *   - extraConfirmedWeeks: Notion 등 외부 확정 주차
+   * @param {{ extraWeeks?: object[], extraConfirmedWeeks?: object[], replayWeeks?: object[] }} [options]
+   *   - extraWeeks: Notion 등 외부 주차(Draft 포함)
+   *   - extraConfirmedWeeks: 이전 호출 호환용
    *   - replayWeeks: 횟수/큐 재계산에 쓸 전체 확정 주차(미지정 시 화면 weeks)
    */
   const searchSchedule = useCallback((startDate, endDate, options = {}) => {
-    const extraConfirmedWeeks = options.extraConfirmedWeeks ?? [];
+    const extraWeeks =
+      options.extraWeeks ?? options.extraConfirmedWeeks ?? [];
     const replayWeeksOption = options.replayWeeks;
 
-    patchState((prev) => {
+    return patchState((prev) => {
       const hostIds = getActiveHosts(prev.hosts).map((h) => h.id);
       const generated = generateWeeks(startDate, endDate, hostIds);
       const weeks = mergeConfirmedIntoWeeks(generated, [
         prev.weeks,
-        extraConfirmedWeeks,
+        extraWeeks,
       ]);
 
       const replaySource =
@@ -123,7 +126,7 @@ export function useScheduler() {
           ? replayWeeksOption
           : [
               ...prev.weeks.filter((w) => w.confirmed),
-              ...extraConfirmedWeeks.filter((w) => w.confirmed),
+              ...extraWeeks.filter((w) => w.confirmed),
               ...weeks.filter((w) => w.confirmed),
             ];
 
@@ -234,7 +237,7 @@ export function useScheduler() {
         }),
         priorityQueue: filterActiveQueue(replayed.queue, replayed.hosts),
         basePriorityQueue: filterActiveQueue(basePriorityQueue, replayed.hosts),
-        weeks,
+        weeks: applySequentialLocks(weeks),
       };
     });
   }, [patchState]);
@@ -345,9 +348,38 @@ export function useScheduler() {
   }, [commitState]);
 
   const updateAttendance = useCallback((weekId, hostId, day, present) => {
-    patchState((prev) => ({
+    const prev = stateRef.current;
+    const target = prev.weeks.find((week) => week.id === weekId);
+    if (!target || target.confirmed) {
+      return { ok: false, error: 'NOT_EDITABLE' };
+    }
+
+    const snapshot = patchState((current) => ({
+      ...current,
+      weeks: updateAttendanceUtil(
+        current.weeks,
+        weekId,
+        hostId,
+        day,
+        present,
+      ),
+    }));
+    return {
+      ok: true,
+      snapshot,
+      week: snapshot.weeks.find((week) => week.id === weekId),
+    };
+  }, [patchState]);
+
+  const applyRemoteAttendance = useCallback((weekId, attendance) => {
+    if (!attendance) return null;
+    return patchState((prev) => ({
       ...prev,
-      weeks: updateAttendanceUtil(prev.weeks, weekId, hostId, day, present),
+      weeks: prev.weeks.map((week) =>
+        week.id === weekId && !week.confirmed
+          ? { ...week, attendance }
+          : week,
+      ),
     }));
   }, [patchState]);
 
@@ -481,6 +513,7 @@ export function useScheduler() {
     canRemoveHost,
     setHostActive,
     updateAttendance,
+    applyRemoteAttendance,
     confirmAndAssignWeek,
     swapAssignments,
     isWeekFrozen: (weekId) => isWeekFrozen(state.weeks, weekId),

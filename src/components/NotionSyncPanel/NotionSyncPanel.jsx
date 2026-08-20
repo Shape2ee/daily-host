@@ -130,7 +130,7 @@ export function NotionSyncPanel({
           <div>
             <h2 className={styles.title}>Notion 동기화</h2>
             <p className={styles.subtitle}>
-              Active·우선순위·당월 스케줄 양방향 동기화 · 주차 확정 시 자동 반영
+              Active·우선순위·주차·출근 양방향 동기화
             </p>
           </div>
           <span
@@ -165,7 +165,7 @@ export function NotionSyncPanel({
             disabled={isBusy}
             onClick={handlePushSchedules}
           >
-            확정 주차 업로드/업데이트
+            주차 업로드/업데이트
           </button>
           <button
             type="button"

@@ -12,12 +12,31 @@ import {
   getSeoulToday,
   listMembers,
   listSchedules,
+  patchScheduleAttendance,
   upsertMember,
   upsertSchedule,
 } from './notion/service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
+
+// 같은 서버 인스턴스에서 동일 주차의 연속 체크 요청을 순서대로 처리한다.
+// 서버리스 인스턴스 간 경합은 service의 저장 후 검증·재시도로 보완한다.
+const attendanceLocks = new Map();
+
+async function withAttendanceLock(weekKey, task) {
+  const previous = attendanceLocks.get(weekKey) ?? Promise.resolve();
+  const current = previous.catch(() => {}).then(task);
+  attendanceLocks.set(weekKey, current);
+
+  try {
+    return await current;
+  } finally {
+    if (attendanceLocks.get(weekKey) === current) {
+      attendanceLocks.delete(weekKey);
+    }
+  }
+}
 
 /**
  * Express 앱 (로컬 listen / Vercel serverless 공용)
@@ -137,11 +156,46 @@ export function createApp() {
         results,
         created: results.filter((r) => r.action === 'created').length,
         updated: results.filter((r) => r.action === 'updated').length,
+        skipped: results.filter((r) => r.action === 'skipped').length,
       });
     } catch (error) {
       res.status(error.status || 500).json({
         ok: false,
         error: error.message || '스케줄 동기화 실패',
+      });
+    }
+  });
+
+  app.post('/api/notion/schedules/attendance', async (req, res) => {
+    try {
+      const config = assertConfigured('schedule');
+      const notion = createNotionClient(config.token);
+      const week = req.body?.week;
+      const day = req.body?.day;
+      const hostName = String(req.body?.hostName ?? '').trim();
+      const present = req.body?.present;
+
+      if (!week?.weekKey || !hostName || typeof present !== 'boolean') {
+        return res.status(400).json({
+          ok: false,
+          error: 'week.weekKey, hostName, present(boolean)가 필요합니다.',
+        });
+      }
+
+      const result = await withAttendanceLock(week.weekKey, () =>
+        patchScheduleAttendance(notion, config.scheduleDbId, {
+          week,
+          day,
+          hostName,
+          present,
+        }),
+      );
+
+      res.json({ ok: true, ...result });
+    } catch (error) {
+      res.status(error.status || 500).json({
+        ok: false,
+        error: error.message || '출근 정보 동기화 실패',
       });
     }
   });

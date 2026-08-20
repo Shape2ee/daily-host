@@ -229,8 +229,8 @@ Notion Schedule `Name` 예시: `2026-08-03~2026-08-06`
 
 | 방향 | 시점 | 내용 |
 |------|------|------|
-| 앱 → Notion | Active 토글, 멤버 추가/삭제, 확정, Swap | Active, Priority, BasePriority, 확정 스케줄(**배정 + 요일별 출근자**) |
-| Notion → 앱 | 첫 진입, 멤버 불러오기, 일정 조회 | Active·**BasePriority** + 확정 스케줄 Replay → `priorityQueue` 재구성(**배정 + 출근 복원**) |
+| 앱 → Notion | 일정 조회, 출근 체크, Active 토글, 확정, Swap | Draft 주차 생성, 출근 단건 병합, Active, Priority, 확정 스케줄 |
+| Notion → 앱 | 첫 진입, 멤버 불러오기, 일정 조회 | Draft/확정 출근 복원 + **BasePriority와 확정 스케줄만 Replay** |
 | 영속 | 항상 | localStorage 자동 저장 (앱 원본에 가깝게 동작) |
 | 실패 시 | Sync 실패 | 로컬 유지 + 미동기화 뱃지 + 재동기화 버튼 |
 

@@ -207,9 +207,11 @@ export async function getHostForDate(notion, scheduleDbId, dateStr) {
     ],
   });
 
-  if (!pages[0]) return base;
+  const schedule = pages
+    .map(mapSchedulePage)
+    .find((item) => item.status !== 'Draft');
+  if (!schedule) return base;
 
-  const schedule = mapSchedulePage(pages[0]);
   const hostName = schedule[day] || null;
 
   return {
@@ -254,7 +256,7 @@ export async function archiveSchedules(
   return { archived };
 }
 
-export async function upsertSchedule(notion, scheduleDbId, week) {
+async function findSchedulePages(notion, scheduleDbId, week) {
   let existing = await queryAll(notion, scheduleDbId, {
     property: 'WeekKey',
     rich_text: { equals: week.weekKey },
@@ -272,6 +274,20 @@ export async function upsertSchedule(notion, scheduleDbId, week) {
       return period?.start === week.startDate;
     });
   }
+  return existing;
+}
+
+export async function upsertSchedule(notion, scheduleDbId, week) {
+  const existing = await findSchedulePages(notion, scheduleDbId, week);
+  const existingSchedule = existing[0]
+    ? mapSchedulePage(existing[0])
+    : null;
+
+  // Draft 전체 upsert는 생성 전용이다. 기존 주차의 Attendance는 반드시
+  // 단일 체크 병합 API로만 바꿔 stale 브라우저의 일괄 덮어쓰기를 막는다.
+  if (existingSchedule && week.confirmed === false) {
+    return { action: 'skipped', schedule: existingSchedule };
+  }
 
   const properties = {
     Name: titleProp(week.name),
@@ -284,7 +300,7 @@ export async function upsertSchedule(notion, scheduleDbId, week) {
     Thursday: richTextProp(week.thursday ?? ''),
     Attendance: richTextProp(week.attendance ?? ''),
     SlackText: richTextProp(week.slackText ?? ''),
-    Status: selectProp(existing[0] ? 'Updated' : 'Confirmed'),
+    Status: selectProp(week.confirmed === false ? 'Draft' : 'Confirmed'),
   };
 
   if (existing[0]) {
@@ -300,4 +316,90 @@ export async function upsertSchedule(notion, scheduleDbId, week) {
     properties,
   });
   return { action: 'created', schedule: mapSchedulePage(page) };
+}
+
+function parseAttendanceNames(text) {
+  try {
+    const parsed = JSON.parse(String(text ?? ''));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Draft 주차의 Attendance JSON에서 한 체크 항목만 read-modify-write 한다.
+ * 저장 후 요청한 값이 유지됐는지 확인하고, 경합이 감지되면 최신 값 위에서 재시도한다.
+ */
+export async function patchScheduleAttendance(
+  notion,
+  scheduleDbId,
+  { week, day, hostName, present },
+) {
+  if (!week?.weekKey || !hostName) {
+    const error = new Error('week.weekKey와 hostName이 필요합니다.');
+    error.status = 400;
+    throw error;
+  }
+  if (!['monday', 'tuesday', 'wednesday', 'thursday'].includes(day)) {
+    const error = new Error('유효하지 않은 요일입니다.');
+    error.status = 400;
+    throw error;
+  }
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let pages = await findSchedulePages(notion, scheduleDbId, week);
+    if (!pages[0]) {
+      await upsertSchedule(notion, scheduleDbId, {
+        ...week,
+        confirmed: false,
+      });
+      pages = await findSchedulePages(notion, scheduleDbId, week);
+    }
+
+    const current = pages[0] ? mapSchedulePage(pages[0]) : null;
+    if (!current) {
+      const error = new Error('Draft 주차를 생성하지 못했습니다.');
+      error.status = 500;
+      throw error;
+    }
+    if (current.status !== 'Draft') {
+      const error = new Error('확정된 주차의 출근 정보는 변경할 수 없습니다.');
+      error.status = 409;
+      throw error;
+    }
+
+    const attendance = parseAttendanceNames(current.attendance);
+    const names = new Set(Array.isArray(attendance[day]) ? attendance[day] : []);
+    if (present) names.add(hostName);
+    else names.delete(hostName);
+    attendance[day] = [...names];
+
+    await notion.pages.update({
+      page_id: pages[0].id,
+      properties: {
+        Attendance: richTextProp(JSON.stringify(attendance)),
+      },
+    });
+
+    const verifiedPages = await findSchedulePages(notion, scheduleDbId, week);
+    const verified = verifiedPages[0]
+      ? mapSchedulePage(verifiedPages[0])
+      : null;
+    const verifiedAttendance = parseAttendanceNames(verified?.attendance);
+    const isPresent = Array.isArray(verifiedAttendance[day])
+      ? verifiedAttendance[day].includes(hostName)
+      : false;
+
+    if (isPresent === Boolean(present)) {
+      return { schedule: verified, attempts: attempt + 1 };
+    }
+  }
+
+  const error = new Error('동시 수정 충돌로 출근 정보를 저장하지 못했습니다.');
+  error.status = 409;
+  throw error;
 }

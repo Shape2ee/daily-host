@@ -91,31 +91,41 @@ export function applySequentialLocks(weeks) {
 }
 
 /**
- * 새로 생성한 주차 골격에 기존/외부 확정 주차를 병합한다.
- * 같은 캘린더 주차(월요일 기준)면 확정 기록을 우선한다.
+ * 새로 생성한 주차 골격에 기존/외부 주차를 병합한다.
+ * 같은 캘린더 주차면 확정 기록을 최우선하고, 미확정끼리는 뒤에 전달된
+ * 소스(Notion 원격 상태 등)를 우선한다.
  */
 export function mergeConfirmedIntoWeeks(generatedWeeks, confirmedSources = []) {
-  const confirmedByKey = new Map();
+  const weekByKey = new Map();
 
   for (const source of confirmedSources) {
     if (!Array.isArray(source)) continue;
     for (const week of source) {
-      if (!week?.confirmed) continue;
+      if (!week) continue;
       const key = getWeekMondayKey(week);
-      if (!key || confirmedByKey.has(key)) continue;
-      confirmedByKey.set(key, week);
+      if (!key) continue;
+
+      const existing = weekByKey.get(key);
+      if (!existing) {
+        weekByKey.set(key, week);
+        continue;
+      }
+
+      if (existing.confirmed && !week.confirmed) continue;
+      // 미확정은 확정을 덮지 못한다. 같은 상태끼리는 뒤 소스가 최신이다.
+      weekByKey.set(key, week);
     }
   }
 
   const merged = generatedWeeks.map((generated) => {
     const mondayKey = getWeekMondayKey(generated);
-    const confirmed = confirmedByKey.get(mondayKey);
-    if (!confirmed) return generated;
+    const stored = weekByKey.get(mondayKey);
+    if (!stored) return generated;
 
     // Notion upsert 키가 조회 구간 index에 묶이지 않도록 월요일 키로 정규화
     return {
-      ...confirmed,
-      id: mondayKey || confirmed.id,
+      ...stored,
+      id: mondayKey || stored.id,
     };
   });
 

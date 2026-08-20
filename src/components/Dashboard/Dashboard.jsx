@@ -5,6 +5,7 @@ import {
   clearNotionSchedules,
   fetchNotionMembers,
   fetchNotionSchedules,
+  patchNotionAttendance,
   pushNotionMembers,
   upsertNotionSchedules,
 } from "../../api/notion";
@@ -74,7 +75,7 @@ async function syncWeeksToNotion(
   weekIds = null,
 ) {
   const map = createHostMap(hosts);
-  let payload = buildSchedulePayload(weeks, map);
+  let payload = buildSchedulePayload(weeks, map, { includeDrafts: true });
   if (weekIds != null) {
     const idSet = new Set(Array.isArray(weekIds) ? weekIds : [weekIds]);
     payload = payload.filter((item) => idSet.has(item.weekKey));
@@ -119,6 +120,22 @@ async function syncMembersPriorityToNotion(
   }
 }
 
+async function patchAttendanceWithRetry(payload, maxAttempts = 3) {
+  let lastError;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await patchNotionAttendance(payload);
+    } catch (error) {
+      lastError = error;
+      if (error.status === 409 || attempt === maxAttempts) throw error;
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, attempt * 300);
+      });
+    }
+  }
+  throw lastError;
+}
+
 /**
  * Admin Dashboard 레이아웃.
  */
@@ -136,6 +153,7 @@ export function Dashboard() {
     canRemoveHost,
     setHostActive,
     updateAttendance,
+    applyRemoteAttendance,
     confirmAndAssignWeek,
     swapAssignments,
     resetAll,
@@ -152,6 +170,7 @@ export function Dashboard() {
   const [notionSyncPending, setNotionSyncPending] = useState(readNotionPending);
   const fileInputRef = useRef(null);
   const toastTimerRef = useRef(null);
+  const attendanceSyncRef = useRef(new Map());
 
   const showToast = (message) => {
     setToast(message);
@@ -247,8 +266,8 @@ export function Dashboard() {
   }, []);
 
   const handleSearch = async (startDate, endDate) => {
-    // 로컬 확정 주차는 searchSchedule 내부에서 먼저 병합
-    searchSchedule(startDate, endDate);
+    // 먼저 로컬 주차를 표시하고, 원격 상태를 받은 뒤 Notion 우선으로 다시 병합한다.
+    const localSnapshot = searchSchedule(startDate, endDate);
 
     try {
       const result = await fetchNotionSchedules();
@@ -258,17 +277,66 @@ export function Dashboard() {
         startDate,
         endDate,
       );
-      if (inRange.length === 0) return;
-
-      const extraConfirmedWeeks = notionSchedulesToWeeks(inRange, hosts);
-      const allConfirmedWeeks = notionSchedulesToWeeks(schedules, hosts);
-      searchSchedule(startDate, endDate, {
-        extraConfirmedWeeks,
-        replayWeeks: allConfirmedWeeks,
+      const snapshotHosts = localSnapshot?.hosts ?? hosts;
+      const extraWeeks = notionSchedulesToWeeks(inRange, snapshotHosts);
+      const allWeeks = notionSchedulesToWeeks(schedules, snapshotHosts);
+      const snapshot = searchSchedule(startDate, endDate, {
+        extraWeeks,
+        replayWeeks: allWeeks,
       });
-    } catch {
-      // Notion 실패 시 로컬 병합 결과 유지
+
+      const draftPayload = buildSchedulePayload(
+        snapshot.weeks.filter((week) => !week.confirmed),
+        createHostMap(snapshot.hosts),
+        { includeDrafts: true },
+      );
+      if (draftPayload.length > 0) {
+        await upsertNotionSchedules(draftPayload);
+      }
+    } catch (error) {
+      // 원격 조회 실패 시 로컬 결과는 유지하되, 덮어쓰기 방지를 위해 push하지 않는다.
+      markNotionPending();
+      showToast(`일정 동기화 실패: ${error.message}`);
     }
+  };
+
+  const handleUpdateAttendance = (weekId, hostId, day, present) => {
+    const result = updateAttendance(weekId, hostId, day, present);
+    if (!result?.ok || !result.week) return;
+
+    const host = result.snapshot.hosts.find((item) => item.id === hostId);
+    const [weekPayload] = buildSchedulePayload(
+      [result.week],
+      createHostMap(result.snapshot.hosts),
+      { includeDrafts: true },
+    );
+    if (!host || !weekPayload) return;
+
+    // 같은 브라우저에서 동일 주차를 빠르게 수정해도 요청 순서가 뒤집히지 않게 한다.
+    const previous =
+      attendanceSyncRef.current.get(weekId) ?? Promise.resolve();
+    const current = previous
+      .catch(() => {})
+      .then(() =>
+        patchAttendanceWithRetry({
+          week: weekPayload,
+          day,
+          hostName: host.name,
+          present,
+        }),
+      );
+    attendanceSyncRef.current.set(weekId, current);
+
+    current
+      .catch((error) => {
+        markNotionPending();
+        showToast(`출근 정보 동기화 실패: ${error.message}`);
+      })
+      .finally(() => {
+        if (attendanceSyncRef.current.get(weekId) === current) {
+          attendanceSyncRef.current.delete(weekId);
+        }
+      });
   };
 
   const handlePushSchedules = async (label) => {
@@ -401,6 +469,37 @@ export function Dashboard() {
   };
 
   const handleConfirm = async (weekId) => {
+    const pendingAttendance = attendanceSyncRef.current.get(weekId);
+    if (pendingAttendance) {
+      showToast('출근 정보 동기화 완료 후 주차를 확정합니다…');
+      try {
+        await pendingAttendance;
+      } catch {
+        showToast('출근 정보 동기화 실패로 주차 확정을 중단했습니다.');
+        return;
+      }
+    }
+
+    try {
+      const schedulesResult = await fetchNotionSchedules();
+      const remoteWeek = notionSchedulesToWeeks(
+        schedulesResult.schedules ?? [],
+        hosts,
+      ).find((week) => week.id === weekId);
+
+      if (remoteWeek?.confirmed) {
+        showToast('이미 다른 사용자가 확정한 주차입니다. 새로고침해 주세요.');
+        return;
+      }
+      if (remoteWeek) {
+        applyRemoteAttendance(weekId, remoteWeek.attendance);
+      }
+    } catch (error) {
+      markNotionPending();
+      showToast(`최신 출근 정보를 확인하지 못해 확정을 중단했습니다: ${error.message}`);
+      return;
+    }
+
     const result = confirmAndAssignWeek(weekId);
     if (result?.error === 'EMPTY_ATTENDANCE') {
       const days = (result.emptyDays ?? [])
@@ -625,7 +724,7 @@ export function Dashboard() {
             basePriorityQueue={basePriorityQueue}
             busy={notionBusy}
             historyTick={historyTick}
-            onPushSchedules={() => handlePushSchedules("확정 주차 동기화")}
+            onPushSchedules={() => handlePushSchedules("주차 동기화")}
             onLoadMembers={(members, schedules) =>
               hydrateFromNotion(members, undefined, schedules)
             }
@@ -636,7 +735,7 @@ export function Dashboard() {
             hosts={hosts}
             hostMap={hostMap}
             loading={monthBootstrapping}
-            onUpdateAttendance={updateAttendance}
+            onUpdateAttendance={handleUpdateAttendance}
             onConfirm={handleConfirm}
             onSwap={handleSwap}
             onCopySlack={showToast}
