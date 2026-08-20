@@ -14,8 +14,8 @@ Notion DB/셋업은 [NOTION.md](./NOTION.md)를 참고하세요.
 | 개념 | 설명 |
 |------|------|
 | Priority | 숫자 점수가 아님. **큐 배열에서 앞일수록 1위** |
-| Round-robin | 배정되면 큐 **맨 뒤(Tail)** 로 이동 |
-| 통계(`count` 등) | 수행 비율 표시용. **배정 순위 계산에는 사용하지 않음** |
+| 정렬 기준 | **`count` 오름차순** → 동률이면 **마지막 배정이 늦은 쪽이 뒤** |
+| Round-robin | 배정되면 큐 **맨 뒤(Tail)** 로 이동 후 `count` 기준 재정렬 |
 | 표시명 | `N주차` 대신 **날짜 구간** (`2026-08-03~2026-08-06`) |
 
 ---
@@ -81,7 +81,7 @@ Notion DB/셋업은 [NOTION.md](./NOTION.md)를 참고하세요.
 
 1. 빈 출근 요일 검사
 2. 월→목 순으로 `assignDay`
-3. 배정될 때마다 `moveHostToQueueTail` → `priorityQueue` 갱신
+3. 배정될 때마다 `moveHostToQueueTail` → `sortQueueByCount` → `priorityQueue` 갱신
 4. `count` / `totalWorkingDays` 갱신
 5. `confirmed: true`, 다음 Week 잠금 해제
 6. Soft Reset 대기 멤버가 배정에 참여하면 `softResetPending = false`
@@ -176,9 +176,10 @@ Swap / 일정 재조회 / Notion hydrate는 `basePriorityQueue`에서 확정 이
 사용 시점: **Swap**, **일정 재조회**, **Notion hydrate(멤버 로드)** 등.
 
 1. `basePriorityQueue`의 활성 멤버로 시작 (`softResetPending` 제외)
-2. 확정 Week를 시간순으로 돌며 배정자마다 Tail 이동
-3. Soft Reset 멤버를 평균 위치에 재삽입
-4. 확정 배정 결과(assignments) 자체는 변경하지 않음 — **다음 미확정 배정용 큐만** 재구성
+2. 확정 Week를 시간순으로 돌며 배정자마다 Tail 이동 (→ 큐 순서가 **마지막 배정 시점** 순이 됨)
+3. 최종 `count` 오름차순으로 **stable sort** → 동률은 2번의 순서(마지막 배정 늦을수록 뒤) 유지
+4. Soft Reset 멤버를 평균 위치에 재삽입
+5. 확정 배정 결과(assignments) 자체는 변경하지 않음 — **다음 미확정 배정용 큐만** 재구성
 
 > Notion hydrate: Members의 **BasePriority** + 확정 Schedule History를 함께 가져와  
 > `replayQueueAndCounts`로 최종 `priorityQueue`를 재구성한다.  
@@ -275,7 +276,7 @@ Sync가 성공하고 Soft Reset 직후가 아니면, 서로 다른 브라우저�
 - [x] Swap / 일정 재조회 Replay 후에도 Soft Reset 위치가 유지되는가?
 - [x] Notion 실패 시 로컬 유지 + 미동기화 뱃지 + 재동기화 버튼이 있는가?
 - [x] 공유/Notion Name에 `N주차` 없이 날짜 구간만 사용되는가?
-- [x] `count`가 큐 순서에 영향을 주지 않는가?
+- [x] `count`가 많은 멤버가 큐 뒤로 밀리고, 동률이면 마지막 배정자가 뒤인가?
 - [x] 일정 재조회 시 같은 기간 확정 기록이 유지되는가?
 - [x] Notion hydrate가 Notion `Priority`가 아니라 **BasePriority + 확정 Schedule Replay**로 `priorityQueue`를 만드는가?
 - [x] 활성 4명·월~목 전원 배정 후 큐가 원점으로 돌아오는 것이 Round-robin으로 설명되는가?

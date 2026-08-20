@@ -566,6 +566,18 @@ export function moveHostToQueueTail(queue, hostId) {
 }
 
 /**
+ * 큐를 배정 횟수(count) 오름차순으로 재정렬한다.
+ * Array.prototype.sort 는 stable 하므로, 동률이면 기존 큐 순서(= 마지막 배정이
+ * 늦을수록 뒤)가 그대로 유지된다.
+ */
+export function sortQueueByCount(queue, hosts) {
+  const countById = new Map(hosts.map((h) => [h.id, h.count ?? 0]));
+  return [...queue].sort(
+    (a, b) => (countById.get(a) ?? 0) - (countById.get(b) ?? 0),
+  );
+}
+
+/**
  * 단일 요일 자동 배정.
  * 큐 Front부터 순회하여 당일 출근(attendance === true)인 첫 멤버를 배정한다.
  * (연속 배정 가드 없음 — 순수 Round-robin)
@@ -673,6 +685,9 @@ export function replayQueueAndCounts(hosts, baseQueue, weeks) {
     }
   }
 
+  // 횟수가 많을수록 뒤로 (동률이면 마지막 배정이 늦은 쪽이 뒤)
+  nextQueue = sortQueueByCount(nextQueue, nextHosts);
+
   // Soft-reset 멤버를 최종 큐의 평균 위치에 재삽입
   nextQueue = applySoftResetToQueue(nextQueue, nextHosts);
 
@@ -735,6 +750,7 @@ export function assignWeek(week, hosts, queue) {
     });
 
     nextQueue = moveHostToQueueTail(nextQueue, hostId);
+    nextQueue = sortQueueByCount(nextQueue, nextHosts);
   }
 
   if (failedDays.length > 0) {
