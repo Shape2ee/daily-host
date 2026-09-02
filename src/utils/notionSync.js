@@ -5,6 +5,7 @@ import {
   formatSlackShare,
   getAvailableDays,
   getMondayOfWeek,
+  isCountAdjusted,
   parseDate,
 } from './scheduler.js';
 
@@ -207,6 +208,10 @@ export function notionMembersToHosts(members, previousHosts = []) {
       count: 0,
       totalWorkingDays: 0,
       active: member.active !== false,
+      // count는 확정 이력 Replay 후 확정되므로 softResetPending도 그때 재계산된다.
+      softResetPending: Number(member.baselineCount) > 0,
+      baselineCount: Number(member.baselineCount) || 0,
+      lastHostedAt: member.lastHostedAt ?? '',
       notionPageId: member.notionPageId ?? null,
       note: member.note ?? '',
       _priority: member.priority ?? null,
@@ -261,6 +266,9 @@ export function buildMembersPayload(hosts, priorityQueue, basePriorityQueue) {
       id: host.id,
       name: host.name,
       active: host.active !== false,
+      softResetPending: isCountAdjusted(host),
+      baselineCount: host.baselineCount ?? 0,
+      lastHostedAt: host.lastHostedAt ?? '',
       note: host.note ?? '',
       priority: priorityIdx >= 0 ? priorityIdx : null,
       basePriority: baseIdx >= 0 ? baseIdx : null,

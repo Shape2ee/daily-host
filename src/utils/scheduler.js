@@ -148,6 +148,50 @@ export function filterActiveQueue(queue, hosts) {
 }
 
 /**
+ * 순위 점수. 복귀/신규 기준선을 실제 횟수가 따라잡으면 기준선은 무의미해진다.
+ */
+export function getEffectiveCount(host) {
+  return Math.max(host?.count ?? 0, host?.baselineCount ?? 0);
+}
+
+/** 실제 횟수가 아직 복귀 기준선에 도달하지 못한 상태 (= 보정 중) */
+export function isCountAdjusted(host) {
+  return (host?.count ?? 0) < (host?.baselineCount ?? 0);
+}
+
+/**
+ * 활성 멤버의 실제 진행 횟수 평균 (Math.round).
+ * excludeId가 있으면 그 멤버는 평균에서 뺀다.
+ */
+export function getAverageActiveCount(hosts, excludeId = null) {
+  const peers = getActiveHosts(hosts).filter((h) => h.id !== excludeId);
+  if (peers.length === 0) return 0;
+  const sum = peers.reduce((total, host) => total + (host.count ?? 0), 0);
+  return Math.round(sum / peers.length);
+}
+
+function laterDate(left, right) {
+  const a = left || '';
+  const b = right || '';
+  return a >= b ? a : b;
+}
+
+/**
+ * 복귀/신규 멤버의 순위 기준선을 복귀 당일 활성 멤버 평균 횟수로 잡는다.
+ * 기준선은 고정값이라 다시 계산해도 흔들리지 않고,
+ * 실제 횟수가 기준선을 넘어서면 자동으로 효력을 잃는다.
+ */
+export function applyAverageCountBaseline(host, peerHosts, dateStr) {
+  const baselineCount = getAverageActiveCount(peerHosts, host.id);
+  const next = {
+    ...host,
+    baselineCount,
+    lastHostedAt: dateStr,
+  };
+  return { ...next, softResetPending: isCountAdjusted(next) };
+}
+
+/**
  * Week의 startDate~endDate 구간에서 실제 존재하는 월~목 요일을 반환한다.
  */
 export function getAvailableDays(week) {
@@ -311,14 +355,18 @@ export function addHost(hosts, queue, baseQueue, weeks, name) {
   const nextId =
     hosts.length === 0 ? 1 : Math.max(...hosts.map((h) => h.id)) + 1;
 
-  const newHost = {
-    id: nextId,
-    name: trimmed,
-    count: 0,
-    totalWorkingDays: 0,
-    active: true,
-    notionPageId: null,
-  };
+  const newHost = applyAverageCountBaseline(
+    {
+      id: nextId,
+      name: trimmed,
+      count: 0,
+      totalWorkingDays: 0,
+      active: true,
+      notionPageId: null,
+    },
+    hosts,
+    formatDate(new Date()),
+  );
 
   const nextWeeks = weeks.map((week) => {
     if (week.confirmed) {
@@ -336,11 +384,12 @@ export function addHost(hosts, queue, baseQueue, weeks, name) {
     };
   });
 
+  const nextHosts = [...hosts, newHost];
   return {
     ok: true,
-    hosts: [...hosts, newHost],
-    queue: [...queue, nextId],
-    baseQueue: [...baseQueue, nextId],
+    hosts: nextHosts,
+    queue: sortQueueByPriority([...queue, nextId], nextHosts),
+    baseQueue: sortQueueByPriority([...baseQueue, nextId], nextHosts),
     weeks: nextWeeks,
   };
 }
@@ -410,74 +459,9 @@ export function removeHost(hosts, queue, baseQueue, weeks, hostId) {
 }
 
 /**
- * 활성 멤버들의 평균 큐 인덱스에 hostId를 삽입한다.
- * (숫자 priority 필드 대신 Queue 순서가 Priority 역할을 한다.)
- * - Active 0명: 맨 뒤(length)에 삽입
- * - Active 1명: 기존 1위 유지를 위해 최소 인덱스 1
- * @returns {{ queue: number[], averageIndex: number }}
- */
-export function insertAtAveragePriority(queue, hostId, activePeerIds) {
-  const without = queue.filter((id) => id !== hostId);
-
-  if (!activePeerIds || activePeerIds.length === 0) {
-    const averageIndex = without.length;
-    return { queue: [...without, hostId], averageIndex };
-  }
-
-  const indices = activePeerIds
-    .map((id) => without.indexOf(id))
-    .filter((index) => index >= 0);
-
-  if (indices.length === 0) {
-    const averageIndex = without.length;
-    return { queue: [...without, hostId], averageIndex };
-  }
-
-  let averageIndex = Math.round(
-    indices.reduce((sum, index) => sum + index, 0) / indices.length,
-  );
-
-  // Active 1명일 때 복귀자가 1위를 뺏지 않도록 최소 2위(index 1)
-  if (activePeerIds.length === 1) {
-    averageIndex = Math.max(1, averageIndex);
-  }
-
-  const clamped = Math.max(0, Math.min(averageIndex, without.length));
-  const next = [...without];
-  next.splice(clamped, 0, hostId);
-  return { queue: next, averageIndex: clamped };
-}
-
-/**
- * softResetPending 멤버를 현재 큐의 평균 위치에 다시 삽입한다.
- */
-export function applySoftResetToQueue(queue, hosts) {
-  const pendingIds = hosts
-    .filter((h) => h.active !== false && h.softResetPending)
-    .map((h) => h.id);
-
-  if (pendingIds.length === 0) {
-    return filterActiveQueue(queue, hosts);
-  }
-
-  let next = queue.filter((id) => !pendingIds.includes(id));
-  next = filterActiveQueue(next, hosts);
-
-  for (const hostId of pendingIds) {
-    const peers = next.filter((id) => id !== hostId);
-    const inserted = insertAtAveragePriority(next, hostId, peers);
-    next = inserted.queue;
-  }
-
-  return next;
-}
-
-/**
  * 멤버 활성/비활성 전환.
- * - 비활성: 통계(count/totalWorkingDays) 유지, 큐에서 제외
- * - 재활성: 현재 활성 멤버 평균 Priority(큐 순위)로 Soft Reset.
- *           count / totalWorkingDays 등 누적 통계는 유지한다.
- *           softResetPending 플래그로 Swap/재조회 Replay 후에도 보정 유지.
+ * - 비활성: 통계 유지, 큐에서 제외
+ * - 재활성: 활성 멤버 평균 횟수(round)를 점수로 부여하고 마지막 진행일을 당일로 둔다.
  */
 export function setHostActive(hosts, queue, baseQueue, hostId, active) {
   const target = hosts.find((h) => h.id === hostId);
@@ -494,9 +478,7 @@ export function setHostActive(hosts, queue, baseQueue, hostId, active) {
 
   if (!active) {
     const nextHosts = hosts.map((h) =>
-      h.id === hostId
-        ? { ...h, active: false, softResetPending: false }
-        : h,
+      h.id === hostId ? { ...h, active: false } : h,
     );
 
     return {
@@ -519,28 +501,25 @@ export function setHostActive(hosts, queue, baseQueue, hostId, active) {
     };
   }
 
-  // 재활성화 직전 기준의 다른 Active 멤버 (본인 제외)
-  const activePeerIds = getActiveHosts(hosts)
-    .filter((h) => h.id !== hostId)
-    .map((h) => h.id);
-
+  const today = formatDate(new Date());
   const nextHosts = hosts.map((h) =>
     h.id === hostId
-      ? { ...h, active: true, softResetPending: true }
+      ? applyAverageCountBaseline({ ...h, active: true }, hosts, today)
       : h,
   );
-
-  const nextQueue = insertAtAveragePriority(queue, hostId, activePeerIds);
-  const nextBase = insertAtAveragePriority(baseQueue, hostId, activePeerIds);
+  const withHost = (q) => (q.includes(hostId) ? q : [...q, hostId]);
+  const nextQueue = sortQueueByPriority(withHost(queue), nextHosts);
+  const nextBase = sortQueueByPriority(withHost(baseQueue), nextHosts);
+  const adjusted = nextHosts.find((h) => h.id === hostId);
 
   return {
     ok: true,
     hosts: nextHosts,
-    queue: nextQueue.queue,
-    baseQueue: nextBase.queue,
+    queue: filterActiveQueue(nextQueue, nextHosts),
+    baseQueue: filterActiveQueue(nextBase, nextHosts),
     reactivated: true,
-    /** 0-based queue index (표시용 순위는 +1) */
-    averagePriority: nextQueue.averageIndex,
+    averageCount: adjusted?.baselineCount ?? 0,
+    adjusting: isCountAdjusted(adjusted),
   };
 }
 
@@ -576,15 +555,24 @@ export function moveHostToQueueTail(queue, hostId) {
 }
 
 /**
- * 큐를 배정 횟수(count) 오름차순으로 재정렬한다.
- * Array.prototype.sort 는 stable 하므로, 동률이면 기존 큐 순서(= 마지막 배정이
- * 늦을수록 뒤)가 그대로 유지된다.
+ * 횟수(보정 포함) 오름차순, 동률이면 마지막 진행일이 늦을수록 뒤.
  */
+export function sortQueueByPriority(queue, hosts) {
+  const byId = new Map(hosts.map((h) => [h.id, h]));
+  return [...queue].sort((a, b) => {
+    const hostA = byId.get(a);
+    const hostB = byId.get(b);
+    const countDiff = getEffectiveCount(hostA) - getEffectiveCount(hostB);
+    if (countDiff !== 0) return countDiff;
+    const lastA = hostA?.lastHostedAt ?? '';
+    const lastB = hostB?.lastHostedAt ?? '';
+    if (lastA !== lastB) return lastA < lastB ? -1 : 1;
+    return (a ?? 0) - (b ?? 0);
+  });
+}
+
 export function sortQueueByCount(queue, hosts) {
-  const countById = new Map(hosts.map((h) => [h.id, h.count ?? 0]));
-  return [...queue].sort(
-    (a, b) => (countById.get(a) ?? 0) - (countById.get(b) ?? 0),
-  );
+  return sortQueueByPriority(queue, hosts);
 }
 
 /**
@@ -643,29 +631,22 @@ export function recountFromWeeks(hosts, weeks) {
 
 /**
  * 확정된 배정 결과를 1일차부터 순차 Replay하여
- * count / totalWorkingDays / priorityQueue를 재계산한다.
- * (동결된 과거 주차의 배정 결과 자체는 변경하지 않으며,
- *  재계산된 큐는 미확정 차주 배정에만 사용된다.)
- *
- * softResetPending 멤버는 Replay 순환에서 제외한 뒤,
- * 최종 큐에 평균 위치로 다시 삽입한다.
- * (휴면 기간 미배정으로 앞으로 밀려 올라가는 문제 방지)
+ * count / totalWorkingDays / lastHostedAt / priorityQueue를 재계산한다.
+ * baselineCount는 Notion/로컬에 저장된 값을 유지한다.
  */
 export function replayQueueAndCounts(hosts, baseQueue, weeks) {
+  const storedLastById = new Map(
+    hosts.map((h) => [h.id, h.lastHostedAt ?? '']),
+  );
+
   let nextHosts = hosts.map((h) => ({
     ...h,
     count: 0,
     totalWorkingDays: 0,
+    lastHostedAt: '',
   }));
 
-  const softResetIds = new Set(
-    hosts.filter((h) => h.softResetPending).map((h) => h.id),
-  );
-
-  // Replay 중에는 soft-reset 대기 멤버를 큐에서 제외 (현재 활성만)
-  let nextQueue = filterActiveQueue(baseQueue, hosts).filter(
-    (id) => !softResetIds.has(id),
-  );
+  let nextQueue = filterActiveQueue(baseQueue, hosts);
 
   for (const week of weeks) {
     if (!week.confirmed) continue;
@@ -681,13 +662,19 @@ export function replayQueueAndCounts(hosts, baseQueue, weeks) {
 
       const assignedId = week.assignments?.[day];
       if (assignedId !== undefined) {
+        const dayDate = getDateForDay(week, day);
+        const dayKey = dayDate ? formatDate(dayDate) : '';
+
         nextHosts = nextHosts.map((host) =>
           host.id === assignedId
-            ? { ...host, count: host.count + 1 }
+            ? {
+                ...host,
+                count: host.count + 1,
+                lastHostedAt: laterDate(host.lastHostedAt, dayKey),
+              }
             : host,
         );
 
-        // 활성 멤버만 큐 순환 (비활성·soft-reset 대기는 제외)
         if (nextQueue.includes(assignedId)) {
           nextQueue = moveHostToQueueTail(nextQueue, assignedId);
         }
@@ -695,11 +682,13 @@ export function replayQueueAndCounts(hosts, baseQueue, weeks) {
     }
   }
 
-  // 횟수가 많을수록 뒤로 (동률이면 마지막 배정이 늦은 쪽이 뒤)
-  nextQueue = sortQueueByCount(nextQueue, nextHosts);
+  nextHosts = nextHosts.map((host) => ({
+    ...host,
+    lastHostedAt: laterDate(storedLastById.get(host.id), host.lastHostedAt),
+    softResetPending: isCountAdjusted(host),
+  }));
 
-  // Soft-reset 멤버를 최종 큐의 평균 위치에 재삽입
-  nextQueue = applySoftResetToQueue(nextQueue, nextHosts);
+  nextQueue = sortQueueByPriority(nextQueue, nextHosts);
 
   return { hosts: nextHosts, queue: nextQueue };
 }
@@ -748,11 +737,13 @@ export function assignWeek(week, hosts, queue) {
       }
 
       if (host.id === hostId) {
+        const dayDate = getDateForDay(week, day);
         updated = {
           ...updated,
           count: updated.count + 1,
-          // 배정에 참여하면 soft-reset 보정 대기 해제
-          softResetPending: false,
+          lastHostedAt: dayDate
+            ? laterDate(updated.lastHostedAt, formatDate(dayDate))
+            : updated.lastHostedAt,
         };
       }
 
@@ -760,7 +751,7 @@ export function assignWeek(week, hosts, queue) {
     });
 
     nextQueue = moveHostToQueueTail(nextQueue, hostId);
-    nextQueue = sortQueueByCount(nextQueue, nextHosts);
+    nextQueue = sortQueueByPriority(nextQueue, nextHosts);
   }
 
   if (failedDays.length > 0) {
@@ -1002,15 +993,20 @@ export function parseBackup(data) {
     return { ok: false, error: 'INVALID_SCHEMA' };
   }
 
-  const hosts = data.hosts.map((h) => ({
-    id: h.id,
-    name: h.name,
-    count: h.count ?? 0,
-    totalWorkingDays: h.totalWorkingDays ?? 0,
-    active: h.active !== false,
-    softResetPending: Boolean(h.softResetPending),
-    notionPageId: h.notionPageId ?? null,
-  }));
+  const hosts = data.hosts.map((h) => {
+    const count = h.count ?? 0;
+    const host = {
+      id: h.id,
+      name: h.name,
+      count,
+      totalWorkingDays: h.totalWorkingDays ?? 0,
+      active: h.active !== false,
+      baselineCount: h.baselineCount ?? count + (h.countAdjustment ?? 0),
+      lastHostedAt: h.lastHostedAt ?? '',
+      notionPageId: h.notionPageId ?? null,
+    };
+    return { ...host, softResetPending: isCountAdjusted(host) };
+  });
 
   if (hosts.some((h) => h.id == null || !h.name)) {
     return { ok: false, error: 'INVALID_HOSTS' };

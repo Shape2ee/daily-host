@@ -28,10 +28,12 @@ Notion DB/셋업은 [NOTION.md](./NOTION.md)를 참고하세요.
 {
   id,                 // 앱 내부 ID (Notion AppHostId와 매핑)
   name,
-  count,              // 확정 배정 횟수
-  totalWorkingDays,   // 출근 일수 (비율 계산용)
+  count,              // 확정 배정 횟수 (화면 표시)
+  baselineCount,      // 복귀/신규 당일 평균 횟수(고정). 순위는 max(count, 이 값)
+  lastHostedAt,       // 마지막 진행일 YYYY-MM-DD
+  totalWorkingDays,   // 출근 일수 (비율 계산용, 순위에는 미반영)
   active,             // true | false
-  softResetPending,   // 재활성 Soft Reset 대기 (Replay 보호)
+  softResetPending,   // count < baselineCount 와 동일 (보정 중)
   notionPageId?,
   note?,
 }
@@ -39,6 +41,9 @@ Notion DB/셋업은 [NOTION.md](./NOTION.md)를 참고하세요.
 
 - 활성 최소 인원: **2명** (`MIN_HOST_COUNT`)
 - 비활성 시 통계는 유지, 큐에서만 제외
+- 출근 비율(`calcWorkRatio` = `count / totalWorkingDays`)은 **표시 전용 참고 지표**입니다.
+  출근 일수가 다른 멤버끼리 절대 횟수만 비교하면 왜곡되므로 기회 대비 부담을 보여주지만,
+  배정 알고리즘은 이 값을 사용하지 않습니다.
 
 ### 2.2 Priority Queues
 
@@ -84,7 +89,7 @@ Notion DB/셋업은 [NOTION.md](./NOTION.md)를 참고하세요.
 3. 배정될 때마다 `moveHostToQueueTail` → `sortQueueByCount` → `priorityQueue` 갱신
 4. `count` / `totalWorkingDays` 갱신
 5. `confirmed: true`, 다음 Week 잠금 해제
-6. Soft Reset 대기 멤버가 배정에 참여하면 `softResetPending = false`
+6. 보정 중이던 멤버의 `count`가 `baselineCount`에 도달하면 `softResetPending = false`
 
 예시:
 
@@ -106,44 +111,39 @@ Notion DB/셋업은 [NOTION.md](./NOTION.md)를 참고하세요.
 
 ### 4.1 비활성화
 
-- `count`, `totalWorkingDays` **유지**
+- `count`, `totalWorkingDays`, `baselineCount` **유지**
 - `priorityQueue`, `basePriorityQueue`에서 **제거**
-- `softResetPending = false`
 - Notion Members `Active` 체크박스 **false** 로 동기화
 
-### 4.2 재활성화 (Soft Reset)
+### 4.2 재활성화 / 신규 추가 (평균 기준선)
 
-휴면 동안 큐에 안 돌아가서 복귀 직후 1위를 독식하는 것을 막습니다.
+휴면·신규로 0회가 되어 1위를 독식하는 것을 막습니다.
 
-1. 현재 Active 멤버(본인 제외) 큐 인덱스의 **평균** (`Math.round`)
-2. 그 위치에 삽입
-3. `softResetPending = true`
-4. 통계는 그대로 유지
-5. Notion `Active` + Priority 동기화
+1. 현재 Active 멤버(본인 제외)의 **실제 진행 횟수 평균** (`Math.round`) → `baselineCount`
+2. 순위 점수 = `max(count, baselineCount)`
+3. `lastHostedAt = 당일` → 동률이면 복귀자/신규가 뒤
+4. 화면에는 실제 `N회`와 **보정 중** 배지, 순위용 점수를 함께 표시
+5. Notion `Active` + `BaselineCount` + `LastHostedAt` + `SoftResetPending` 동기화
 
-| 예외 | 동작 |
-|------|------|
-| Active 0명 | 큐 **맨 뒤** (`length`) |
-| Active 1명 | 기존 1위 유지 → 복귀자는 **최소 index 1 (2위)** |
+신규 추가도 **같은 규칙**입니다. 기존 멤버가 없으면 기준선 0입니다.
+이미 기준선 이상 횟수가 있으면 점수에 영향이 없고, 마지막 진행일만 당일로 갱신됩니다.
 
-예시: Active `[A,B,C,D]` (0~3) → 평균 1.5 → 2  
-복귀 `E` → `[A, B, E, C, D]`
+### 4.3 보정 해제 시점
 
-### 4.3 Soft Reset + Replay 보호
+기준선은 지우지 않아도 됩니다. 복귀자가 실제로 진행해서 `count`가 `baselineCount`에 도달하는 순간
+`max(count, baselineCount) === count`가 되어 보정이 자연히 사라지고 **보정 중** 배지도 없어집니다.
 
-Swap / 일정 재조회 / Notion hydrate는 `basePriorityQueue`에서 확정 이력을 Replay합니다.  
-이때 Soft Reset 멤버를 처음부터 넣으면, 휴면 기간 미배정 때문에 **앞으로 밀려 올라갑니다.**
+```
+복귀 시 baselineCount = 3, count = 0  → 점수 3 (보정 중)
+1회 진행                 count = 1  → 점수 3 (보정 중)
+3회 진행                 count = 3  → 점수 3 (보정 해제)
+5회 진행                 count = 5  → 점수 5
+```
 
-대응:
+기준선은 고정값이라 Replay/재조회로 `count`를 다시 세도 흔들리지 않습니다.
+복귀 당일 `lastHostedAt`은 유지하고, 배정일과 비교해 더 늦은 쪽을 씁니다.
 
-1. Replay 중 `softResetPending` 멤버는 큐 순환에서 **제외**
-2. Replay 종료 후 최종 큐의 **평균 위치**에 다시 삽입
-3. 이후 주차 확정으로 실제 배정되면 플래그 해제
-
-> **한계 (크로스 브라우저):** `softResetPending`은 **로컬(localStorage)만** 유지되고 Notion에는 없다.  
-> 재활성한 브라우저에서는 보호되지만, 다른 PC/브라우저가 Base+Replay만 하면  
-> 복귀자가 휴면 기간 미배정분만큼 **앞으로 밀릴 수 있다.**  
-> (재활성 직후 Notion에 올라간 Priority/BasePriority와, 이후 추가 확정 Replay가 겹칠 때)
+정렬: **점수(오름차순) → 마지막 진행일(오름차순, 늦은 쪽이 뒤)**
 
 ---
 
@@ -166,8 +166,8 @@ Swap / 일정 재조회 / Notion hydrate는 `basePriorityQueue`에서 확정 이
 ### 5.3 횟수 / 큐 재계산
 
 조회 후 `replayQueueAndCounts(basePriorityQueue, 확정 weeks)` 로  
-`count` / `totalWorkingDays` / `priorityQueue` 를 다시 맞춥니다.  
-(Soft Reset 보호 규칙 적용)
+`count` / `totalWorkingDays` / `lastHostedAt` / `priorityQueue` 를 다시 맞춥니다.  
+(`baselineCount`는 유지)
 
 ---
 
@@ -175,16 +175,14 @@ Swap / 일정 재조회 / Notion hydrate는 `basePriorityQueue`에서 확정 이
 
 사용 시점: **Swap**, **일정 재조회**, **Notion hydrate(멤버 로드)** 등.
 
-1. `basePriorityQueue`의 활성 멤버로 시작 (`softResetPending` 제외)
-2. 확정 Week를 시간순으로 돌며 배정자마다 Tail 이동 (→ 큐 순서가 **마지막 배정 시점** 순이 됨)
-3. 최종 `count` 오름차순으로 **stable sort** → 동률은 2번의 순서(마지막 배정 늦을수록 뒤) 유지
-4. Soft Reset 멤버를 평균 위치에 재삽입
+1. `basePriorityQueue`의 활성 멤버로 시작
+2. 확정 Week를 시간순으로 돌며 실제 `count`와 `lastHostedAt`을 재계산
+3. 저장된 `baselineCount`와 비교해 점수 `max(count, baselineCount)`를 만들고, `lastHostedAt`은 저장된 값과 배정일 중 늦은 쪽
+4. 점수 오름차순, 동률이면 마지막 진행일이 늦은 쪽이 뒤
 5. 확정 배정 결과(assignments) 자체는 변경하지 않음 — **다음 미확정 배정용 큐만** 재구성
 
-> Notion hydrate: Members의 **BasePriority** + 확정 Schedule History를 함께 가져와  
-> `replayQueueAndCounts`로 최종 `priorityQueue`를 재구성한다.  
-> (Notion `Priority` 필드를 그대로 쓰지 않음 — stale Priority로 배정자가 1위에 남는 문제 방지)  
-> Notion에서 InActive→Active로 바뀐 멤버는 Soft Reset을 적용한다.
+> Notion hydrate: Members의 **BaselineCount·LastHostedAt·BasePriority** + 확정 Schedule History로
+> `replayQueueAndCounts`가 최종 `priorityQueue`를 재구성한다.
 
 ---
 
@@ -241,7 +239,7 @@ Active는 로컬 전용이 아닙니다. 토글 시 Notion `Active` 체크박스
 확정·토글 시 해당 브라우저는 Notion에 **즉시 push**하지만,  
 이미 열린 다른 탭/PC는 자동 갱신되지 않는다.  
 **페이지 열기 · 새로고침 · 멤버 불러오기 · 일정 조회** 시점에 Base+Replay로 맞춘다.  
-Sync가 성공하고 Soft Reset 직후가 아니면, 서로 다른 브라우저에서 열어봐도 같은 Priority 순위가 나와야 한다.
+Sync가 성공하면 Soft Reset 직후에도 서로 다른 브라우저에서 같은 Priority 순위가 나와야 한다.
 
 ---
 
@@ -286,11 +284,11 @@ Sync가 성공하고 Soft Reset 직후가 아니면, 서로 다른 브라우저�
 ## 14. 한 줄 요약
 
 **앞사람부터 배정 → 배정되면 뒤로.** (연속 배정 가드 없음)  
-재활성은 **평균 순위 Soft Reset**,  
-Swap / 재조회 / **Notion hydrate**는 **base + Replay**,  
+재활성·신규는 **활성 멤버 평균 횟수(round) 보정**,  
+Swap / 재조회 / **Notion hydrate**는 **실제 횟수 + 보정 + 마지막 진행일**,  
 Notion 실패 시에도 **로컬 우선** + 재동기화 UI,  
 표시·공유·Notion Name은 **날짜 구간**만 사용합니다.  
-브라우저 간 순위는 **열기/새로고침 시점**에 맞추며(실시간 X), Soft Reset 플래그는 로컬 전용이다.
+브라우저 간 순위는 **열기/새로고침 시점**에 맞춘다(실시간 X).
 
 ---
 
@@ -299,8 +297,8 @@ Notion 실패 시에도 **로컬 우선** + 재동기화 UI,
 1. **연속 배정 가드 제거**  
    직전 요일과 무관하게 큐 Front부터 출근 가능 멤버를 배정한다.
 
-2. **Soft Reset 다중 복귀**  
-   복귀 처리 순서대로, 당시 Active 멤버 평균 인덱스에 순차 삽입한다.
+2. **복귀/신규 다중 적용**  
+   각자 당시 활성 멤버 평균 횟수(`round`)를 기준선으로 잡고 당일을 마지막 진행일로 둔다.
 
 3. **최소 활성 인원**  
    Active가 `MIN_HOST_COUNT`(2)명일 때 비활성 시도 → 토스트로 차단 (`MIN_HOSTS`).
@@ -309,12 +307,12 @@ Notion 실패 시에도 **로컬 우선** + 재동기화 UI,
    로컬(`localStorage`) 먼저 반영. 실패 시 상단 **미동기화 변경사항 존재** 뱃지 + **[Notion 재동기화]** 버튼.  
    플래그는 `NOTION_PENDING_KEY`로 브라우저에 유지된다.
 
-5. **Soft Reset Replay 보호**  
-   Replay 중 `softResetPending` 제외 → 완료 후 최종 큐 평균 위치에 재삽입.  
-   단, 플래그는 로컬만 → **다른 브라우저**에서는 보호가 약해질 수 있다 (§4.3).
+5. **기준선 Replay 유지**  
+   실제 `count`는 확정 이력으로 다시 세고, `baselineCount`와 복귀/신규 당일 `lastHostedAt`은 Notion에서 복원한다.
+   `count`가 기준선을 넘어서면 보정은 자동으로 사라진다.
 
 6. **활성 N명 = 배정 요일 수**  
-   전원 출근으로 한 주를 확정하면 큐가 확정 전과 같아 보일 수 있다 (Round-robin 원점 복귀).
+   전원 출근으로 한 주를 확정하면 큐가 확정 전과 같아 보일 수 있다 (횟수 정렬 결과).
 
 7. **크로스 브라우저 / 실시간**  
    Notion push는 즉시, 다른 클라이언트 반영은 hydrate·조회 시점. 이미 열린 탭은 자동 갱신 없음.

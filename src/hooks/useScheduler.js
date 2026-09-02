@@ -14,7 +14,6 @@ import {
   getActiveHosts,
   getWeekMondayKey,
   hasConfirmedAssignment,
-  insertAtAveragePriority,
   isWeekFrozen,
   mergeConfirmedIntoWeeks,
   parseBackup,
@@ -147,10 +146,9 @@ export function useScheduler() {
 
   /**
    * Notion 멤버(+스케줄)로 앱 상태를 hydrate한다.
-   * - Active / BasePriority: Notion Members
-   * - priorityQueue: BasePriority 위에서 확정 Schedule을 시간순 Replay한 결과
+   * - BasePriority + BaselineCount + LastHostedAt: Notion Members
+   * - priorityQueue: 확정 Schedule Replay 후 점수·마지막 진행일로 정렬
    *   (Notion Priority 필드를 그대로 쓰지 않음 — stale Priority 방지)
-   * - Notion에서 InActive→Active 로 바뀐 멤버는 Soft Reset 적용
    * - 화면 weeks: displaySchedules (당월) 기준
    */
   const hydrateFromNotion = useCallback((members, displaySchedules, allSchedules) => {
@@ -163,42 +161,6 @@ export function useScheduler() {
         const mapped = notionMembersToHosts(members, prev.hosts);
         hosts = mapped.hosts;
         basePriorityQueue = mapped.basePriorityQueue;
-
-        // Notion Active 상태 기준으로 재활성 Soft Reset
-        const prevById = new Map(prev.hosts.map((h) => [h.id, h]));
-        const reactivatedIds = [];
-
-        hosts = hosts.map((h) => {
-          const prevHost = prevById.get(h.id);
-          const wasInactive = prevHost?.active === false;
-          const nowActive = h.active !== false;
-
-          if (wasInactive && nowActive) {
-            reactivatedIds.push(h.id);
-            return { ...h, softResetPending: true };
-          }
-
-          if (nowActive && prevHost?.softResetPending) {
-            return { ...h, softResetPending: true };
-          }
-
-          return { ...h, softResetPending: false };
-        });
-
-        if (reactivatedIds.length > 0) {
-          basePriorityQueue = basePriorityQueue.filter(
-            (id) => !reactivatedIds.includes(id),
-          );
-
-          for (const hostId of reactivatedIds) {
-            const b = insertAtAveragePriority(
-              basePriorityQueue,
-              hostId,
-              basePriorityQueue,
-            );
-            basePriorityQueue = b.queue;
-          }
-        }
       }
 
       const replaySource =
@@ -228,13 +190,7 @@ export function useScheduler() {
       );
 
       return {
-        hosts: replayed.hosts.map((h) => {
-          const withFlag = hosts.find((x) => x.id === h.id);
-          return {
-            ...h,
-            softResetPending: Boolean(withFlag?.softResetPending),
-          };
-        }),
+        hosts: replayed.hosts,
         priorityQueue: filterActiveQueue(replayed.queue, replayed.hosts),
         basePriorityQueue: filterActiveQueue(basePriorityQueue, replayed.hosts),
         weeks: applySequentialLocks(weeks),
@@ -343,7 +299,8 @@ export function useScheduler() {
       error: null,
       snapshot,
       reactivated: Boolean(result.reactivated),
-      averagePriority: result.averagePriority,
+      averageCount: result.averageCount,
+      adjusting: Boolean(result.adjusting),
     };
   }, [commitState]);
 
@@ -454,6 +411,9 @@ export function useScheduler() {
       ...h,
       count: 0,
       totalWorkingDays: 0,
+      baselineCount: 0,
+      lastHostedAt: '',
+      softResetPending: false,
     }));
 
     const snapshot = {

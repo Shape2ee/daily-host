@@ -80,15 +80,11 @@ export function NotionSyncPanel({
       }
       const schedules = schedulesResult.schedules ?? [];
       await onLoadMembers?.(members, schedules);
-      const activeCount = members.filter((m) => m.active !== false).length;
-      const inactiveCount = members.length - activeCount;
       const schedulePart =
         schedules.length > 0
           ? ` · 확정 스케줄 ${schedules.length}건 Replay`
           : '';
-      onToast(
-        `Notion 멤버 ${members.length}명 불러옴 (Active ${activeCount} / InActive ${inactiveCount})${schedulePart}`,
-      );
+      onToast(`Notion 멤버 ${members.length}명 불러옴${schedulePart}`);
     });
 
   const handlePushMembers = () =>
@@ -99,7 +95,7 @@ export function NotionSyncPanel({
         basePriorityQueue,
       );
       const data = await pushNotionMembers(payload);
-      onToast(`멤버·Active·우선순위 Notion 반영 완료 · ${data.count}명`);
+      onToast(`멤버·우선순위 Notion 반영 완료 · ${data.count}명`);
     });
 
   const handlePushSchedules = () =>

@@ -87,6 +87,9 @@ export function createApp() {
         const saved = await upsertMember(notion, config.membersDbId, {
           name: host.name,
           active: host.active !== false,
+          softResetPending: host.softResetPending === true,
+          baselineCount: host.baselineCount ?? 0,
+          lastHostedAt: host.lastHostedAt ?? '',
           appHostId: host.id,
           priority: host.priority,
           basePriority: host.basePriority,

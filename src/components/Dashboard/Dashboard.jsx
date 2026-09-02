@@ -445,9 +445,8 @@ export function Dashboard() {
     let localMessage;
     if (!active) {
       localMessage = "호스트가 비활성화되었습니다.";
-    } else if (result?.reactivated && result.averagePriority != null) {
-      const avgRank = result.averagePriority + 1;
-      localMessage = `재활성화된 멤버의 우선순위가 현재 활성 멤버들의 평균 점수(${avgRank})로 보정되었습니다.`;
+    } else if (result?.reactivated && result.averageCount != null) {
+      localMessage = `재활성화되었습니다. 활성 멤버 평균 ${result.averageCount}회를 기준선으로 시작합니다.`;
     } else {
       localMessage = "호스트가 활성화되었습니다.";
     }

@@ -65,6 +65,9 @@ function mapMemberPage(page) {
     notionPageId: page.id,
     name: plainText(props.Name),
     active: props.Active?.checkbox !== false,
+    softResetPending: props.SoftResetPending?.checkbox === true,
+    baselineCount: props.BaselineCount?.number ?? 0,
+    lastHostedAt: props.LastHostedAt?.date?.start ?? null,
     appHostId: props.AppHostId?.number ?? null,
     priority: props.Priority?.number ?? null,
     basePriority: props.BasePriority?.number ?? null,
@@ -128,6 +131,9 @@ export async function upsertMember(notion, membersDbId, member) {
   const properties = {
     Name: titleProp(member.name),
     Active: checkboxProp(member.active !== false),
+    SoftResetPending: checkboxProp(member.softResetPending === true),
+    BaselineCount: numberProp(member.baselineCount ?? 0),
+    LastHostedAt: dateProp(member.lastHostedAt || ''),
     AppHostId: numberProp(member.appHostId),
     Priority: numberProp(member.priority),
     BasePriority: numberProp(member.basePriority),
@@ -185,9 +191,22 @@ export function getSeoulToday() {
   return { date, day: weekdayLong };
 }
 
+function toDateOnly(value) {
+  return String(value ?? '').slice(0, 10);
+}
+
+function periodContainsDate(item, dateStr) {
+  const start = toDateOnly(item.startDate);
+  const end = toDateOnly(item.endDate) || start;
+  return Boolean(start) && start <= dateStr && end >= dateStr;
+}
+
 /**
  * 지정 날짜가 Period에 포함된 확정 주차에서 해당 요일 호스트를 반환한다.
  * 월~목만 배정. 해당 주차/호스트 없으면 hostName: null.
+ *
+ * Notion date 필터는 range의 start만 비교하므로
+ * on_or_before ∩ on_or_after 로는 화~목이 빠진다. 포함 여부는 앱에서 계산한다.
  */
 export async function getHostForDate(notion, scheduleDbId, dateStr) {
   const [y, m, d] = dateStr.split('-').map(Number);
@@ -201,15 +220,15 @@ export async function getHostForDate(notion, scheduleDbId, dateStr) {
   }
 
   const pages = await queryAll(notion, scheduleDbId, {
-    and: [
-      { property: 'Period', date: { on_or_before: dateStr } },
-      { property: 'Period', date: { on_or_after: dateStr } },
-    ],
+    property: 'Period',
+    date: { on_or_before: dateStr },
   });
 
-  const schedule = pages
+  const matching = pages
     .map(mapSchedulePage)
-    .find((item) => item.status !== 'Draft');
+    .filter((item) => periodContainsDate(item, dateStr));
+  const schedule =
+    matching.find((item) => item.status !== 'Draft') ?? matching[0];
   if (!schedule) return base;
 
   const hostName = schedule[day] || null;
