@@ -5,6 +5,7 @@ import {
   formatSlackShare,
   getAvailableDays,
   getSwappableDays,
+  getWeekHolidayNotes,
 } from '../../utils/scheduler';
 import { AttendanceTable } from '../AttendanceTable/AttendanceTable';
 import { AssignmentResult } from '../AssignmentResult/AssignmentResult';
@@ -29,6 +30,13 @@ export function WeekSection({
   const [isSwapOpen, setIsSwapOpen] = useState(false);
   const availableDays = getAvailableDays(week);
   const daySummary = availableDays.map((d) => DAY_LABELS[d]).join(' · ');
+  const holidayNotes = getWeekHolidayNotes(week);
+  const holidaySummary = holidayNotes
+    .map((item) => {
+      const [, month, day] = item.date.split('-');
+      return `${Number(month)}/${Number(day)} ${item.name}`;
+    })
+    .join(', ');
   const swappableDays = useMemo(() => getSwappableDays(week), [week]);
   const canSwap = week.confirmed && swappableDays.length > 0;
 
@@ -73,6 +81,9 @@ export function WeekSection({
             {formatDate(week.startDate)} ~ {formatDate(week.endDate)}
           </h3>
           <p className={styles.days}>{daySummary}</p>
+          {holidaySummary && (
+            <p className={styles.holidays}>공휴일 제외: {holidaySummary}</p>
+          )}
         </div>
       </header>
 

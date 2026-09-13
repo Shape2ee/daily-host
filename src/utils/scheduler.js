@@ -1,4 +1,5 @@
 import { DAY_LABELS, MIN_HOST_COUNT } from '../constants/hosts.js';
+import { getPublicHoliday, listHolidaysBetween } from './holidays.js';
 
 /** 배정 대상 요일 순서 */
 export const DAY_KEYS = ['monday', 'tuesday', 'wednesday', 'thursday'];
@@ -122,10 +123,20 @@ export function mergeConfirmedIntoWeeks(generatedWeeks, confirmedSources = []) {
     const stored = weekByKey.get(mondayKey);
     if (!stored) return generated;
 
-    // Notion upsert 키가 조회 구간 index에 묶이지 않도록 월요일 키로 정규화
+    // 확정 기록은 그대로 유지. 미확정은 이번 조회 골격(공휴일 제외 날짜)을 쓰고
+    // 출근/배정만 이어받는다.
+    if (stored.confirmed) {
+      return {
+        ...stored,
+        id: mondayKey || stored.id,
+      };
+    }
+
     return {
-      ...stored,
-      id: mondayKey || stored.id,
+      ...generated,
+      attendance: stored.attendance ?? generated.attendance,
+      assignments: stored.assignments ?? generated.assignments,
+      passes: stored.passes ?? generated.passes,
     };
   });
 
@@ -192,7 +203,15 @@ export function applyAverageCountBaseline(host, peerHosts, dateStr) {
 }
 
 /**
+ * 월~목 배정 대상인지 (금·토·일·법정 공휴일 제외).
+ */
+function isAssignableWeekday(date) {
+  return Boolean(DAY_INDEX_TO_KEY[date.getDay()]) && !getPublicHoliday(date);
+}
+
+/**
  * Week의 startDate~endDate 구간에서 실제 존재하는 월~목 요일을 반환한다.
+ * 법정 공휴일(설날·추석 연휴, 국경일, 대체공휴일 등)은 제외한다.
  */
 export function getAvailableDays(week) {
   const days = [];
@@ -201,7 +220,7 @@ export function getAvailableDays(week) {
 
   while (cursor <= end) {
     const key = DAY_INDEX_TO_KEY[cursor.getDay()];
-    if (key) {
+    if (key && isAssignableWeekday(cursor)) {
       days.push(key);
     }
     cursor.setDate(cursor.getDate() + 1);
@@ -218,7 +237,10 @@ export function getDateForDay(week, dayKey) {
   const end = toDateOnly(week.endDate);
 
   while (cursor <= end) {
-    if (DAY_INDEX_TO_KEY[cursor.getDay()] === dayKey) {
+    if (
+      DAY_INDEX_TO_KEY[cursor.getDay()] === dayKey &&
+      isAssignableWeekday(cursor)
+    ) {
       return toDateOnly(cursor);
     }
     cursor.setDate(cursor.getDate() + 1);
@@ -258,8 +280,19 @@ export function isWeekFrozen(weeks, weekId) {
 }
 
 /**
+ * 해당 주 월~목 중 제외된 법정 공휴일 목록.
+ */
+export function getWeekHolidayNotes(week) {
+  if (!week?.startDate) return [];
+  const monday = getMondayOfWeek(week.startDate);
+  const thursday = new Date(monday);
+  thursday.setDate(monday.getDate() + 3);
+  return listHolidaysBetween(monday, thursday);
+}
+
+/**
  * 시작일~종료일 기준으로 월~목 Week 리스트를 생성한다.
- * 금·토·일은 제외하며, 동일 주차별로 그룹핑한다.
+ * 금·토·일·법정 공휴일은 제외하며, 동일 주차별로 그룹핑한다.
  */
 export function generateWeeks(startDateStr, endDateStr, hostIds) {
   const rangeStart = parseDate(startDateStr);
@@ -276,7 +309,7 @@ export function generateWeeks(startDateStr, endDateStr, hostIds) {
   while (cursor <= end) {
     const dayKey = DAY_INDEX_TO_KEY[cursor.getDay()];
 
-    if (dayKey) {
+    if (dayKey && isAssignableWeekday(cursor)) {
       const monday = getMondayOfWeek(cursor);
       const weekKey = formatDate(monday);
       const days = weekMap.get(weekKey) ?? [];
