@@ -1,7 +1,12 @@
 import { Dashboard } from './components/Dashboard/Dashboard';
+import {WebSocketProvider} from "./components/WebSocketContext/WebSocketContext.jsx";
 
 function App() {
-  return <Dashboard />;
+  return (
+    <WebSocketProvider>
+      <Dashboard />
+    </WebSocketProvider>
+  )
 }
 
 export default App;

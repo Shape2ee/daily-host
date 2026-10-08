@@ -13,6 +13,8 @@ export function ScheduleContainer({
   onConfirm,
   onSwap,
   onCopySlack,
+  realtimeReady = true,
+  onBlocked,
 }) {
   if (loading) {
     return (
@@ -50,6 +52,8 @@ export function ScheduleContainer({
           onConfirm={onConfirm}
           onSwap={onSwap}
           onCopySlack={onCopySlack}
+          realtimeReady={realtimeReady}
+          onBlocked={onBlocked}
         />
       ))}
     </div>

@@ -13,6 +13,7 @@ import {
   calcWorkRatio,
   createHostMap,
   formatAllSlackShares,
+  serializeBackup,
 } from "../../utils/scheduler";
 import {
   buildMembersPayload,
@@ -27,7 +28,12 @@ import { DateSearchForm } from "../DateSearchForm/DateSearchForm";
 import { HostManagementPanel } from "../HostManagementPanel/HostManagementPanel";
 import { NotionSyncPanel } from "../NotionSyncPanel/NotionSyncPanel";
 import { ScheduleContainer } from "../ScheduleContainer/ScheduleContainer";
+import { StatusBadge } from "../StatusBadge/StatusBadge.jsx";
 import styles from "./Dashboard.module.scss";
+import {useConfetti} from "../../hooks/useConfetti.js";
+import {useWebSocketContext} from "../WebSocketContext/WebSocketContext.jsx";
+import {CONNECTING_TOAST, MESSAGE_TYPES} from "../../constants/webSocket.js";
+import {useWebSocketListener} from "../../hooks/useWebSocketListener.js";
 
 function readNotionPending() {
   try {
@@ -154,6 +160,7 @@ export function Dashboard() {
     setHostActive,
     updateAttendance,
     applyRemoteAttendance,
+    applyRemoteSnapshot,
     confirmAndAssignWeek,
     swapAssignments,
     resetAll,
@@ -171,6 +178,10 @@ export function Dashboard() {
   const fileInputRef = useRef(null);
   const toastTimerRef = useRef(null);
   const attendanceSyncRef = useRef(new Map());
+  // 낙관적 확정 중 다른 사용자의 확정 스냅샷이 도착한 주차 (롤백 억제용)
+  const remoteConfirmedRef = useRef(new Set());
+  const { fireFireworks } = useConfetti();
+  const { sendMessage, isConnected, isReconnecting } = useWebSocketContext()
 
   const showToast = (message) => {
     setToast(message);
@@ -178,6 +189,12 @@ export function Dashboard() {
       window.clearTimeout(toastTimerRef.current);
     }
     toastTimerRef.current = window.setTimeout(() => setToast(null), 3200);
+  };
+
+  const requireRealtime = () => {
+    if (isConnected) return true;
+    showToast(CONNECTING_TOAST);
+    return false;
   };
 
   const markNotionPending = useCallback(() => {
@@ -266,8 +283,13 @@ export function Dashboard() {
   }, []);
 
   const handleSearch = async (startDate, endDate) => {
+    if (!requireRealtime()) return;
     // 먼저 로컬 주차를 표시하고, 원격 상태를 받은 뒤 Notion 우선으로 다시 병합한다.
     const localSnapshot = searchSchedule(startDate, endDate);
+    sendMessage({
+      type: MESSAGE_TYPES.SCHEDULE_CREATED,
+      snapshot: serializeBackup(localSnapshot),
+    });
 
     try {
       const result = await fetchNotionSchedules();
@@ -283,6 +305,10 @@ export function Dashboard() {
       const snapshot = searchSchedule(startDate, endDate, {
         extraWeeks,
         replayWeeks: allWeeks,
+      });
+      sendMessage({
+        type: MESSAGE_TYPES.SCHEDULE_CREATED,
+        snapshot: serializeBackup(snapshot),
       });
 
       const draftPayload = buildSchedulePayload(
@@ -301,6 +327,7 @@ export function Dashboard() {
   };
 
   const handleUpdateAttendance = (weekId, hostId, day, present) => {
+    if (!requireRealtime()) return;
     const result = updateAttendance(weekId, hostId, day, present);
     if (!result?.ok || !result.week) return;
 
@@ -311,6 +338,13 @@ export function Dashboard() {
       { includeDrafts: true },
     );
     if (!host || !weekPayload) return;
+
+    // Notion 왕복을 기다리지 않고, 로컬에 반영된 출근 상태를 바로 공유한다.
+    sendMessage({
+      type: MESSAGE_TYPES.ATTENDANCE_UPDATED,
+      weekId,
+      attendance: result.week.attendance,
+    });
 
     // 같은 브라우저에서 동일 주차를 빠르게 수정해도 요청 순서가 뒤집히지 않게 한다.
     const previous =
@@ -466,40 +500,19 @@ export function Dashboard() {
       }
     }
   };
+  
+  const requestVerification = () =>
+    fetchNotionSchedules().then(
+      (value) => ({ ok: true, value }),
+      (error) => ({ ok: false, error }),
+    );
 
-  const handleConfirm = async (weekId) => {
-    const pendingAttendance = attendanceSyncRef.current.get(weekId);
-    if (pendingAttendance) {
-      showToast('출근 정보 동기화 완료 후 주차를 확정합니다…');
-      try {
-        await pendingAttendance;
-      } catch {
-        showToast('출근 정보 동기화 실패로 주차 확정을 중단했습니다.');
-        return;
-      }
-    }
+  const findRemoteWeek = (schedules, weekId, hostList) =>
+    notionSchedulesToWeeks(schedules ?? [], hostList).find(
+      (week) => week.id === weekId,
+    );
 
-    try {
-      const schedulesResult = await fetchNotionSchedules();
-      const remoteWeek = notionSchedulesToWeeks(
-        schedulesResult.schedules ?? [],
-        hosts,
-      ).find((week) => week.id === weekId);
-
-      if (remoteWeek?.confirmed) {
-        showToast('이미 다른 사용자가 확정한 주차입니다. 새로고침해 주세요.');
-        return;
-      }
-      if (remoteWeek) {
-        applyRemoteAttendance(weekId, remoteWeek.attendance);
-      }
-    } catch (error) {
-      markNotionPending();
-      showToast(`최신 출근 정보를 확인하지 못해 확정을 중단했습니다: ${error.message}`);
-      return;
-    }
-
-    const result = confirmAndAssignWeek(weekId);
+  const notifyConfirmFailure = (result) => {
     if (result?.error === 'EMPTY_ATTENDANCE') {
       const days = (result.emptyDays ?? [])
         .map((d) => DAY_LABELS[d] ?? d)
@@ -507,25 +520,23 @@ export function Dashboard() {
       showToast(`출근자가 없는 요일이 있어 확정할 수 없습니다. (${days})`);
       return;
     }
-    if (!result?.ok || !result?.snapshot) {
-      showToast('주차를 확정할 수 없습니다.');
-      return;
-    }
+    showToast('주차를 확정할 수 없습니다.');
+  };
 
-    showToast('주차가 확정되었습니다. Notion 동기화 중…');
+  const syncConfirmedWeek = async (weekId, snapshot) => {
     setNotionBusy(true);
     try {
       const weeksResult = await trackWeekSync(
-        result.snapshot.weeks,
-        result.snapshot.hosts,
+        snapshot.weeks,
+        snapshot.hosts,
         showToast,
         '주차 확정 · Notion 동기화',
         weekId,
       );
       const membersResult = await trackMemberSync(
-        result.snapshot.hosts,
-        result.snapshot.priorityQueue,
-        result.snapshot.basePriorityQueue,
+        snapshot.hosts,
+        snapshot.priorityQueue,
+        snapshot.basePriorityQueue,
         { silent: true, showToast },
       );
       if (weeksResult.ok && membersResult.ok) {
@@ -539,7 +550,67 @@ export function Dashboard() {
     }
   };
 
+  const handleConfirm = async (weekId) => {
+    if (!requireRealtime()) return;
+    await confirmOptimistically(weekId);
+  };
+
+  // 소켓 연결 중에는 원격 출근이 ATTENDANCE_UPDATED로 이미 들어와 있으므로,
+  // 왕복을 기다리지 않고 바로 확정하고 검증은 뒤에서 돌린다.
+  const confirmOptimistically = async (weekId) => {
+    const rollbackSnapshot = serializeBackup({
+      hosts,
+      priorityQueue,
+      basePriorityQueue,
+      weeks,
+    });
+
+    const result = confirmAndAssignWeek(weekId);
+    if (!result?.ok || !result?.snapshot) {
+      notifyConfirmFailure(result);
+      return;
+    }
+
+    fireFireworks(); // 축하 폭죽 터트리기
+    sendMessage({
+      type: MESSAGE_TYPES.WEEK_CONFIRMED,
+      weekId,
+      snapshot: serializeBackup(result.snapshot),
+    });
+    showToast('주차가 확정되었습니다. Notion 동기화 중…');
+
+    remoteConfirmedRef.current.delete(weekId);
+    const verification = requestVerification();
+
+    // 확정 payload가 attendance를 통째로 덮어쓰므로, 진행 중이던 patch가 먼저 끝나야 순서가 뒤집히지 않는다.
+    // patch가 실패해도 확정 payload에 출근 정보가 실려 복구되므로 중단하지 않는다.
+    await attendanceSyncRef.current.get(weekId)?.catch(() => {});
+
+    const verified = await verification;
+    const remoteWeek = verified.ok
+      ? findRemoteWeek(
+          verified.value.schedules,
+          weekId,
+          result.snapshot.hosts,
+        )
+      : null;
+
+    if (remoteWeek?.confirmed) {
+      // 상대의 확정 스냅샷이 이미 소켓으로 도착했다면 그쪽이 최신이라 되돌리지 않는다.
+      if (!remoteConfirmedRef.current.has(weekId)) {
+        applyRemoteSnapshot(rollbackSnapshot);
+      }
+      showToast(
+        '이미 다른 사용자가 확정한 주차입니다. 확정을 취소했습니다. 새로고침해 주세요.',
+      );
+      return;
+    }
+
+    await syncConfirmedWeek(weekId, result.snapshot);
+  };
+
   const handleSwap = async (weekId, day, targetHostId) => {
+    if (!requireRealtime()) return;
     const result = swapAssignments(weekId, day, targetHostId);
     if (result?.error) {
       showToast(SWAP_ERROR_MESSAGES[result.error] ?? '맞교환에 실패했습니다.');
@@ -643,7 +714,44 @@ export function Dashboard() {
       setNotionBusy(false);
     }
   };
+  
+  // 다른 클라이언트가 출근 체크를 바꾼 경우: 메시지에 실린 attendance를 바로 반영
+  const handleRemoteAttendance = useCallback(
+    ({ weekId, attendance }) => {
+      if (!weekId || !attendance) return;
+      applyRemoteAttendance(weekId, attendance);
+    },
+    [applyRemoteAttendance],
+  );
 
+  // 다른 클라이언트가 주차를 확정한 경우: 스냅샷으로 즉시 반영
+  const handleRemoteWeekConfirmed = useCallback(
+    ({ weekId, snapshot }) => {
+      if (!snapshot) return;
+      const applied = applyRemoteSnapshot(snapshot);
+      if (!applied.ok) return;
+      if (weekId) remoteConfirmedRef.current.add(weekId);
+      setHistoryTick((n) => n + 1);
+      fireFireworks()
+    },
+    [applyRemoteSnapshot, fireFireworks],
+  );
+
+  // 다른 클라이언트가 일정을 생성한 경우: 주차 리스트 스냅샷을 즉시 반영
+  const handleRemoteScheduleCreated = useCallback(
+    ({ snapshot }) => {
+      if (!snapshot) return;
+      applyRemoteSnapshot(snapshot);
+    },
+    [applyRemoteSnapshot],
+  );
+
+  // 웹소켓 이벤트
+  useWebSocketListener(MESSAGE_TYPES.FIREWORKS, fireFireworks);
+  useWebSocketListener(MESSAGE_TYPES.ATTENDANCE_UPDATED, handleRemoteAttendance);
+  useWebSocketListener(MESSAGE_TYPES.WEEK_CONFIRMED, handleRemoteWeekConfirmed);
+  useWebSocketListener(MESSAGE_TYPES.SCHEDULE_CREATED, handleRemoteScheduleCreated);
+  
   return (
     <div className={styles.dashboard}>
       <header className={styles.topBar}>
@@ -652,6 +760,7 @@ export function Dashboard() {
           <h1 className={styles.heading}>데일리 호스트 자동 배정 시스템</h1>
         </div>
         <div className={styles.headerActions}>
+          <StatusBadge connected={isConnected} reconnecting={isReconnecting} />
           <div className={styles.meta}>
             <span>호스트 {hosts.length}명</span>
             {notionSyncPending && (
@@ -716,7 +825,11 @@ export function Dashboard() {
         </div>
 
         <main className={styles.main}>
-          <DateSearchForm onSearch={handleSearch} />
+          <DateSearchForm
+            onSearch={handleSearch}
+            realtimeReady={isConnected}
+            onBlocked={() => showToast(CONNECTING_TOAST)}
+          />
           <NotionSyncPanel
             hosts={hosts}
             priorityQueue={priorityQueue}
@@ -728,12 +841,16 @@ export function Dashboard() {
               hydrateFromNotion(members, undefined, schedules)
             }
             onToast={showToast}
+            realtimeReady={isConnected}
+            onBlocked={() => showToast(CONNECTING_TOAST)}
           />
           <ScheduleContainer
             weeks={weeks}
             hosts={hosts}
             hostMap={hostMap}
             loading={monthBootstrapping}
+            realtimeReady={isConnected}
+            onBlocked={() => showToast(CONNECTING_TOAST)}
             onUpdateAttendance={handleUpdateAttendance}
             onConfirm={handleConfirm}
             onSwap={handleSwap}

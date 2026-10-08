@@ -21,13 +21,22 @@ function monthEndStr() {
 /**
  * 시작일/종료일(HTML5 date) 입력 후 일정 조회를 트리거한다.
  */
-export function DateSearchForm({ onSearch }) {
+export function DateSearchForm({
+  onSearch,
+  realtimeReady = true,
+  onBlocked,
+}) {
   const [startDate, setStartDate] = useState(todayStr());
   const [endDate, setEndDate] = useState(monthEndStr());
   const [error, setError] = useState(null);
 
   const handleSubmit = (event) => {
     event.preventDefault();
+
+    if (!realtimeReady) {
+      onBlocked?.();
+      return;
+    }
 
     if (!startDate || !endDate) {
       setError('시작일과 종료일을 모두 선택하세요.');
@@ -69,8 +78,12 @@ export function DateSearchForm({ onSearch }) {
 
       <div className={styles.actions}>
         {error && <p className={styles.error}>{error}</p>}
-        <button className={styles.submit} type="submit">
-          일정 조회
+        <button
+          className={styles.submit}
+          type="submit"
+          aria-disabled={!realtimeReady}
+        >
+          일정 생성
         </button>
       </div>
     </form>

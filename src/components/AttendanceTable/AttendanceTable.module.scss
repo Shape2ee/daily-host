@@ -60,3 +60,11 @@
     }
   }
 }
+
+.connecting {
+  opacity: 0.7;
+
+  .checkLabel input {
+    cursor: not-allowed;
+  }
+}

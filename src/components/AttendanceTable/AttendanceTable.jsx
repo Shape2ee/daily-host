@@ -6,12 +6,22 @@ import styles from './AttendanceTable.module.scss';
  * 주차별 월~목 출근 체크 테이블.
  * 확정된 Week는 읽기 전용이다.
  */
-export function AttendanceTable({ week, hosts, onToggle }) {
+export function AttendanceTable({
+  week,
+  hosts,
+  onToggle,
+  realtimeReady = true,
+  onBlocked,
+}) {
   const availableDays = getAvailableDays(week);
   const readOnly = week.confirmed;
 
   return (
-    <div className={styles.wrapper}>
+    <div
+      className={`${styles.wrapper}${
+        !realtimeReady && !readOnly ? ` ${styles.connecting}` : ''
+      }`}
+    >
       <table className={styles.table}>
         <thead>
           <tr>
@@ -35,9 +45,13 @@ export function AttendanceTable({ week, hosts, onToggle }) {
                         type="checkbox"
                         checked={checked}
                         disabled={readOnly}
-                        onChange={(e) =>
-                          onToggle(host.id, day, e.target.checked)
-                        }
+                        onChange={(e) => {
+                          if (!realtimeReady) {
+                            onBlocked?.();
+                            return;
+                          }
+                          onToggle(host.id, day, e.target.checked);
+                        }}
                         aria-label={`${host.name} ${DAY_LABELS[day]} 출근`}
                       />
                     </label>

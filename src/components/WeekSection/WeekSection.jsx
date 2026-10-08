@@ -26,6 +26,8 @@ export function WeekSection({
   onConfirm,
   onSwap,
   onCopySlack,
+  realtimeReady = true,
+  onBlocked,
 }) {
   const [isSwapOpen, setIsSwapOpen] = useState(false);
   const availableDays = getAvailableDays(week);
@@ -90,6 +92,8 @@ export function WeekSection({
       <AttendanceTable
         week={week}
         hosts={weekHosts}
+        realtimeReady={realtimeReady}
+        onBlocked={onBlocked}
         onToggle={(hostId, day, present) =>
           onUpdateAttendance(week.id, hostId, day, present)
         }
@@ -102,7 +106,14 @@ export function WeekSection({
         {!week.confirmed ? (
           <ConfirmButton
             disabled={week.isLocked}
-            onClick={() => onConfirm(week.id)}
+            blocked={!realtimeReady}
+            onClick={() => {
+              if (!realtimeReady) {
+                onBlocked?.();
+                return;
+              }
+              onConfirm(week.id);
+            }}
           />
         ) : (
           <>
@@ -110,7 +121,14 @@ export function WeekSection({
               <button
                 type="button"
                 className={styles.swapButton}
-                onClick={() => setIsSwapOpen(true)}
+                aria-disabled={!realtimeReady}
+                onClick={() => {
+                  if (!realtimeReady) {
+                    onBlocked?.();
+                    return;
+                  }
+                  setIsSwapOpen(true);
+                }}
               >
                 교체 / 맞교환
               </button>

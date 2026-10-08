@@ -340,6 +340,13 @@ export function useScheduler() {
     }));
   }, [patchState]);
 
+  const applyRemoteSnapshot = useCallback((snapshot) => {
+    const parsed = parseBackup(snapshot);
+    if (!parsed.ok) return { ok: false, error: parsed.error };
+    commitState(parsed.state);
+    return { ok: true };
+  }, [commitState]);
+
   const confirmAndAssignWeek = useCallback((weekId) => {
     const prev = stateRef.current;
     const target = prev.weeks.find((w) => w.id === weekId);
@@ -474,6 +481,7 @@ export function useScheduler() {
     setHostActive,
     updateAttendance,
     applyRemoteAttendance,
+    applyRemoteSnapshot,
     confirmAndAssignWeek,
     swapAssignments,
     isWeekFrozen: (weekId) => isWeekFrozen(state.weeks, weekId),

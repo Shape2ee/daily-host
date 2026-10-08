@@ -84,6 +84,17 @@
   &:active {
     transform: translateY(1px);
   }
+
+  &[aria-disabled='true'] {
+    opacity: 0.5;
+    cursor: not-allowed;
+    box-shadow: none;
+
+    &:hover {
+      background: var(--color-primary);
+      box-shadow: none;
+    }
+  }
 }
 
 @media (max-width: 900px) {

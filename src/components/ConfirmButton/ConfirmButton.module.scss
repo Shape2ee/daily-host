@@ -9,16 +9,18 @@
   transition: background var(--transition), transform var(--transition),
     box-shadow var(--transition), opacity var(--transition);
 
-  &:hover:not(:disabled) {
+  &:hover:not(:disabled):not([aria-disabled='true']) {
     background: var(--color-primary-hover);
     box-shadow: 0 8px 20px rgba(37, 99, 235, 0.25);
   }
 
-  &:active:not(:disabled) {
+  &:active:not(:disabled):not([aria-disabled='true']) {
     transform: translateY(1px);
   }
 
-  &:disabled {
+  &:disabled,
+  &[aria-disabled='true'] {
     opacity: 0.5;
+    cursor: not-allowed;
   }
 }

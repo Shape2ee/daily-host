@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import {useCallback, useEffect, useRef, useState} from 'react';
 import {
   fetchNotionHealth,
   fetchNotionMembers,
@@ -8,6 +8,10 @@ import {
 import { buildMembersPayload } from '../../utils/notionSync';
 import { HistoryModal } from '../HistoryModal/HistoryModal';
 import styles from './NotionSyncPanel.module.scss';
+import {useConfetti} from "../../hooks/useConfetti.js";
+import {MESSAGE_TYPES} from "../../constants/webSocket.js";
+import {useWebSocketContext} from "../WebSocketContext/WebSocketContext.jsx";
+import {useWebSocketListener} from "../../hooks/useWebSocketListener.js";
 
 /**
  * Notion 멤버/확정주차 동기화 패널.
@@ -23,14 +27,27 @@ export function NotionSyncPanel({
   /** @type {(members: object[], schedules?: object[]) => void | Promise<void>} */
   onLoadMembers,
   onToast,
+  realtimeReady = true,
+  onBlocked,
 }) {
   const [health, setHealth] = useState(null);
   const [localBusy, setLocalBusy] = useState(false);
   const [history, setHistory] = useState([]);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const { fireFireworks } = useConfetti();
+  const { sendMessage } = useWebSocketContext()
 
   const isBusy = busy || localBusy;
-
+  
+  const handleFireFireworks = useCallback(() => {
+    if (!realtimeReady) {
+      onBlocked?.();
+      return;
+    }
+    sendMessage({type: MESSAGE_TYPES.FIREWORKS})
+    fireFireworks()
+  }, [sendMessage, realtimeReady, onBlocked, fireFireworks])
+  
   const refreshHealth = async () => {
     try {
       const data = await fetchNotionHealth();
@@ -118,7 +135,6 @@ export function NotionSyncPanel({
 
   const configured =
     health?.token && health?.membersDb && health?.scheduleDb;
-
   return (
     <>
       <section className={styles.panel}>
@@ -170,6 +186,14 @@ export function NotionSyncPanel({
             onClick={handleOpenHistory}
           >
             히스토리 조회
+          </button>
+          <button
+            type="button"
+            className={styles.secondary}
+            aria-disabled={!realtimeReady}
+            onClick={handleFireFireworks}
+          >
+            축하하기!!
           </button>
         </div>
       </section>
